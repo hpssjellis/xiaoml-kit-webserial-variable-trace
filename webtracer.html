@@ -686,7 +686,9 @@
       <div class="dot" id="conn-dot"></div>
       <span class="header-status" id="conn-label">DISCONNECTED</span>
     </div>
-    <div class="logo">Github<span> <a href="https://github.com/hpssjellis/xiaoml-kit-webserial-variable-trace">xiaoml-kit-webserial-variable-trace</a></span></div>
+    
+    <div class="logo"><a href="https://github.com/hpssjellis/xiaoml-kit-webserial-variable-trace">Github Link</a></div>
+    
     <div class="header-btns">
       <select class="btn" id="baud-select">
         <option value="9600">9600</option>
@@ -966,6 +968,14 @@ const variables = new Map();  // name → { name, value, addr, type, size, sourc
 let selectedVar = null;
 let varTab = 'all';
 
+// Names seen in the TRACE stream since last TRACE_START — used by the
+// TRACE tab to show ONLY variables that are currently being streamed.
+// Cleared when TRACE stops so the tab resets cleanly.
+const activeTraceNames = new Set();
+
+// Default variables to auto-plot when they first arrive
+const DEFAULT_PLOT_VARS = new Set(['g_accelX', 'g_accelY', 'g_accelZ']);
+
 const MAX_HISTORY = 2000;
 const PLOT_COLORS = [
   '#00d4ff','#00ff99','#ff6b35','#c084fc','#ffcc00',
@@ -1008,6 +1018,14 @@ async function connectSerial() {
     setConnected(true);
     logTerminal(`OK:Connected at ${baud} baud`, 'ok');
     readLoop();
+    // Auto-send SYMBOLS after a short delay so the ESP32 boot messages
+    // arrive first and the webpage is ready to parse the symbol block.
+    // The sketch also sends SYMBOLS on boot, so this is a belt-and-braces
+    // request in case the boot output was missed before connect.
+    setTimeout(() => {
+      sendSerial('SYMBOLS');
+      setVarTab('sym');  // show SYM tab so user sees symbols arrive
+    }, 800);
   } catch(e) {
     logTerminal('ERR:' + e.message, 'err');
   }
@@ -1133,14 +1151,31 @@ function _parseTraceLineCore(data) {
   for (const pair of pairs) {
     const eq = pair.indexOf('=');
     if (eq < 0) continue;
-    const name  = pair.slice(0, eq).trim();
+    const name   = pair.slice(0, eq).trim();
     const valStr = pair.slice(eq + 1).trim();
     const value  = parseFloat(valStr);
     if (isNaN(value)) continue;
 
+    // Track which names are actively streaming — TRACE tab uses this
+    activeTraceNames.add(name);
+
     if (!variables.has(name)) {
-      addVariable(name, { source: 'trace', type: 'f32', size: 4, addr: null });
+      // Brand-new variable never seen before — create it
+      // Auto-plot only the default set on first arrival
+      addVariable(name, {
+        source:  'trace',
+        type:    'f32',
+        size:    4,
+        addr:    null,
+        plotted: DEFAULT_PLOT_VARS.has(name)
+      });
+    } else {
+      // Variable already exists (created by SYM or ELF on boot).
+      // Don't change its source or plotted state — it stays as 'sym'
+      // or 'elf' in the variables map. The TRACE tab shows it because
+      // its name is in activeTraceNames, not because source changed.
     }
+
     const v = variables.get(name);
     v.value = value;
     v.history.push({ t: now, v: value });
@@ -1303,9 +1338,12 @@ function toggleTrace() {
   if (traceStreaming) {
     sendSerial('TRACE_STOP');
     traceStreaming = false;
+    activeTraceNames.clear();   // TRACE tab becomes empty — correct, nothing is streaming
+    refreshVarList();
   } else {
     sendSerial('TRACE_START');
     traceStreaming = true;
+    setVarTab('trace');          // switch to TRACE tab so user sees variables arrive live
   }
   updateTraceBtn();
 }
@@ -1492,19 +1530,16 @@ function parseELF(buffer, filename) {
 function addVariable(name, meta) {
   const color = PLOT_COLORS[colorIdx % PLOT_COLORS.length];
   colorIdx++;
-  // Auto-plot variables that arrive from TRACE stream; ELF/SYM symbols
-  // are listed but not plotted until user clicks the toggle (too many to show at once)
-  const autoPlot = (meta.source === 'trace');
   variables.set(name, {
     name,
-    value: null,
-    addr: meta.addr || null,
-    type: meta.type || 'f32',
-    size: meta.size || 4,
-    source: meta.source || 'trace',
+    value:      null,
+    addr:       meta.addr   || null,
+    type:       meta.type   || 'f32',
+    size:       meta.size   || 4,
+    source:     meta.source || 'trace',
     color,
-    plotted: autoPlot,
-    history: [],
+    plotted:    meta.plotted !== undefined ? meta.plotted : false,
+    history:    [],
     lastUpdate: null,
     stats: { min: Infinity, max: -Infinity, sum: 0, sumSq: 0, n: 0 }
   });
@@ -1523,34 +1558,56 @@ function refreshVarList() {
   const list = document.getElementById('var-list');
   const items = [...variables.values()].filter(v => {
     if (varTab === 'all')   return true;
-    if (varTab === 'trace') return v.source.includes('trace');
+    if (varTab === 'trace') return activeTraceNames.has(v.name);  // only live-streaming vars
     if (varTab === 'elf')   return v.source.includes('elf');
     if (varTab === 'sym')   return v.source.includes('sym');
     return true;
   });
 
   if (items.length === 0) {
-    list.innerHTML = `<div class="empty-state"><div class="es-icon">📡</div>No variables yet</div>`;
+    const msgs = {
+      trace: '📡 Start TRACE to see live variables',
+      sym:   '🔌 Connect device — SYMBOLS loads automatically',
+      elf:   '🔬 Drop a .elf file to see all symbols',
+      all:   '📡 Connect device &amp; start TRACE'
+    };
+    list.innerHTML = `<div class="empty-state"><div class="es-icon">${varTab==='elf'?'🔬':varTab==='sym'?'🔌':'📡'}</div>${msgs[varTab]||msgs.all}</div>`;
     return;
   }
 
   let html = '';
   for (const v of items) {
-    const valStr = v.value !== null ? formatVal(v.value) : '—';
+    const valStr  = v.value !== null ? formatVal(v.value) : '—';
     const addrStr = v.addr ? '0x' + v.addr.toString(16).toUpperCase().padStart(8,'0') : '';
-    const srcCls = v.source.includes('elf') ? 'src-elf' : v.source.includes('sym') ? 'src-sym' : v.source === 'peek' ? 'src-peek' : 'src-trace';
+    const isLive  = activeTraceNames.has(v.name);
+
+    // Badge: show source cleanly. If live in trace, always show 'trace' badge.
+    const badgeLabel = isLive ? 'trace' : v.source;
+    const srcCls = isLive                    ? 'src-trace' :
+                   v.source.includes('elf')  ? 'src-elf'   :
+                   v.source.includes('sym')  ? 'src-sym'   :
+                   v.source === 'peek'        ? 'src-peek'  : 'src-trace';
+
     const isSelected = selectedVar === v.name;
     const isPlotted  = v.plotted;
 
+    // Live value blink indicator
+    const liveIndicator = isLive
+      ? `<div style="width:5px;height:5px;border-radius:50%;background:var(--accent2);box-shadow:0 0 5px var(--accent2);animation:pulse 1s infinite;flex-shrink:0"></div>`
+      : `<div style="width:5px;height:5px;flex-shrink:0"></div>`;
+
     html += `<div class="var-item ${isSelected?'active':''} ${isPlotted?'plotted':''}" onclick="selectVar('${v.name}')">
-      <div class="var-color-dot" style="background:${v.color};${isPlotted?'box-shadow:0 0 6px '+v.color:''}"></div>
-      <div>
-        <div class="var-name">${v.name}</div>
+      <div class="var-color-dot" style="background:${v.color};${isPlotted?'box-shadow:0 0 6px '+v.color:'opacity:0.35'}"></div>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:4px">
+          ${liveIndicator}
+          <div class="var-name">${v.name}</div>
+        </div>
         <div class="var-addr">${addrStr}</div>
       </div>
-      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
-        <div class="var-value">${valStr}</div>
-        <span class="src-badge ${srcCls}">${v.source}</span>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;flex-shrink:0">
+        <div class="var-value" style="color:${isLive?'var(--accent2)':'var(--text2)'}">${valStr}</div>
+        <span class="src-badge ${srcCls}">${badgeLabel}</span>
       </div>
     </div>`;
   }
