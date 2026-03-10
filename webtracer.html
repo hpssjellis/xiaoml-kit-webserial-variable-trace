@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -686,9 +687,7 @@
       <div class="dot" id="conn-dot"></div>
       <span class="header-status" id="conn-label">DISCONNECTED</span>
     </div>
-    
-    <div class="logo"><a href="https://github.com/hpssjellis/xiaoml-kit-webserial-variable-trace">Github Link</a></div>
-    
+
     <div class="header-btns">
       <select class="btn" id="baud-select">
         <option value="9600">9600</option>
@@ -972,6 +971,7 @@ let varTab = 'all';
 // TRACE tab to show ONLY variables that are currently being streamed.
 // Cleared when TRACE stops so the tab resets cleanly.
 const activeTraceNames = new Set();
+let traceInitDone = false;  // flips true after first TRACE line applies default plots
 
 // Default variables to auto-plot when they first arrive
 const DEFAULT_PLOT_VARS = new Set(['g_accelX', 'g_accelY', 'g_accelZ']);
@@ -1160,8 +1160,7 @@ function _parseTraceLineCore(data) {
     activeTraceNames.add(name);
 
     if (!variables.has(name)) {
-      // Brand-new variable never seen before — create it
-      // Auto-plot only the default set on first arrival
+      // Brand-new variable — create it with default plot state
       addVariable(name, {
         source:  'trace',
         type:    'f32',
@@ -1170,10 +1169,11 @@ function _parseTraceLineCore(data) {
         plotted: DEFAULT_PLOT_VARS.has(name)
       });
     } else {
-      // Variable already exists (created by SYM or ELF on boot).
-      // Don't change its source or plotted state — it stays as 'sym'
-      // or 'elf' in the variables map. The TRACE tab shows it because
-      // its name is in activeTraceNames, not because source changed.
+      // Variable already exists (from SYM/ELF on boot).
+      // On the very first TRACE line received, apply default plots once.
+      if (!traceInitDone && DEFAULT_PLOT_VARS.has(name)) {
+        variables.get(name).plotted = true;
+      }
     }
 
     const v = variables.get(name);
@@ -1182,6 +1182,7 @@ function _parseTraceLineCore(data) {
     if (v.history.length > MAX_HISTORY) v.history.shift();
     v.lastUpdate = now;
   }
+  traceInitDone = true;  // default plots only applied on the very first line
   refreshVarList();
   refreshRightPanel();
 }
@@ -1338,12 +1339,13 @@ function toggleTrace() {
   if (traceStreaming) {
     sendSerial('TRACE_STOP');
     traceStreaming = false;
-    activeTraceNames.clear();   // TRACE tab becomes empty — correct, nothing is streaming
+    activeTraceNames.clear();
+    traceInitDone = false;   // reset so next TRACE_START re-applies defaults
     refreshVarList();
   } else {
     sendSerial('TRACE_START');
     traceStreaming = true;
-    setVarTab('trace');          // switch to TRACE tab so user sees variables arrive live
+    setVarTab('trace');
   }
   updateTraceBtn();
 }
