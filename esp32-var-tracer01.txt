@@ -1,0 +1,286 @@
+// ============================================================
+//  esp32-var-tracer.ino
+//  ESP32 Serial Variable & Trace Viewer — companion to tracer.html
+//  Target: Seeed XIAO ESP32S3 (or any ESP32)
+//
+//  Serial commands:
+//    PING                    -> OK:PONG
+//    STATUS                  -> OK:STATUS:...
+//    PEEK:<hexAddr>:<len>    -> PEEK_RESULT:<hexAddr>:<hexBytes...>
+//    TRACE_START             -> begins auto-sending TRACE lines at 20Hz
+//    TRACE_STOP              -> stops auto-trace
+//    SET:<hexAddr>:<hexVal>  -> write 1-4 bytes to RAM address
+//
+//  TRACE output format (auto-sent at ~20Hz when streaming):
+//    TRACE:<varName>=<value>,...
+//
+//  PEEK output format (on demand):
+//    PEEK_RESULT:<hexAddr>:XX XX XX XX
+//
+//  ELF SYMBOL LOOKUP: The webpage parses the .elf file's symbol
+//  table to find variable names + addresses. PEEK then reads
+//  those addresses directly from ESP32 RAM at runtime.
+//
+//  Required: nothing beyond Arduino ESP32 core.
+//  Board: XIAO_ESP32S3 or any ESP32 board
+//  Baud: 115200
+// ============================================================
+
+#include <Arduino.h>
+
+// ── Uncomment any sensors you have ──
+// #include <Wire.h>
+// #include "LSM6DS3.h"
+// LSM6DS3 imu(I2C_MODE, 0x6A);
+
+// ─────────────────────────────────────────────────────
+//  Demo variables — these will be visible in the ELF
+//  symbol table and readable via PEEK from the webpage.
+//  Make them volatile so the compiler doesn't optimize away.
+// ─────────────────────────────────────────────────────
+volatile float   g_accelX      = 0.0f;
+volatile float   g_accelY      = 0.0f;
+volatile float   g_accelZ      = 9.81f;
+volatile float   g_gyroX       = 0.0f;
+volatile float   g_gyroY       = 0.0f;
+volatile float   g_gyroZ       = 0.0f;
+volatile float   g_temperature = 25.0f;
+volatile int32_t g_counter     = 0;
+volatile float   g_sineWave    = 0.0f;
+volatile float   g_squareWave  = 0.0f;
+volatile float   g_sawtoothWave= 0.0f;
+volatile uint8_t g_ledState    = 0;
+volatile float   g_heapFree    = 0.0f;
+
+// ─────────────────────────────────────────────────────
+//  State
+// ─────────────────────────────────────────────────────
+bool traceStreaming = false;
+unsigned long lastTraceMs = 0;
+const uint16_t TRACE_INTERVAL_MS = 50;  // 20 Hz
+
+float phaseAngle = 0.0f;
+
+// ─────────────────────────────────────────────────────
+//  setup()
+// ─────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Uncomment if using IMU:
+  // Wire.begin();
+  // imu.begin();
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  
+  Serial.println("OK:ESP32 Variable Tracer v1.0 ready");
+  Serial.println("OK:Commands: PING STATUS PEEK:<addr>:<len> TRACE_START TRACE_STOP SET:<addr>:<val>");
+  printSymbolHints();
+}
+
+// ─────────────────────────────────────────────────────
+//  loop()
+// ─────────────────────────────────────────────────────
+void loop() {
+  // Handle serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) handleCommand(cmd);
+  }
+
+  // Update demo waveforms and fake sensor data every loop
+  updateDemoVariables();
+
+  // Auto-trace stream
+  if (traceStreaming && (millis() - lastTraceMs >= TRACE_INTERVAL_MS)) {
+    lastTraceMs = millis();
+    sendTraceLine();
+  }
+}
+
+// ─────────────────────────────────────────────────────
+//  Demo variable updates — simulates sensor data
+//  Replace with real sensor reads if you have hardware.
+// ─────────────────────────────────────────────────────
+void updateDemoVariables() {
+  phaseAngle += 0.05f;
+  if (phaseAngle > TWO_PI) phaseAngle -= TWO_PI;
+
+  // Simulated IMU (replace with imu.readFloat* calls)
+  g_accelX = sinf(phaseAngle) * 2.0f;
+  g_accelY = cosf(phaseAngle * 0.7f) * 1.5f;
+  g_accelZ = 9.81f + sinf(phaseAngle * 0.3f) * 0.2f;
+  g_gyroX  = sinf(phaseAngle * 1.3f) * 50.0f;
+  g_gyroY  = cosf(phaseAngle * 0.9f) * 30.0f;
+  g_gyroZ  = sinf(phaseAngle * 2.1f) * 20.0f;
+  g_temperature = 25.0f + sinf(phaseAngle * 0.1f) * 2.0f;
+
+  // Waveform demos
+  g_sineWave    = sinf(phaseAngle) * 100.0f;
+  g_squareWave  = (sinf(phaseAngle) > 0) ? 100.0f : -100.0f;
+  g_sawtoothWave = fmodf(phaseAngle / TWO_PI, 1.0f) * 200.0f - 100.0f;
+
+  g_counter++;
+  g_heapFree = (float)ESP.getFreeHeap();
+
+  // Blink LED every 500ms
+  if ((g_counter % 100) == 0) {
+    g_ledState ^= 1;
+    digitalWrite(LED_BUILTIN, g_ledState);
+  }
+}
+
+// ─────────────────────────────────────────────────────
+//  TRACE output — CSV-style key=value pairs
+//  The webpage parses this and plots each variable.
+// ─────────────────────────────────────────────────────
+void sendTraceLine() {
+  Serial.print("TRACE:");
+  Serial.print("g_accelX=");    Serial.print(g_accelX, 3);    Serial.print(",");
+  Serial.print("g_accelY=");    Serial.print(g_accelY, 3);    Serial.print(",");
+  Serial.print("g_accelZ=");    Serial.print(g_accelZ, 3);    Serial.print(",");
+  Serial.print("g_gyroX=");     Serial.print(g_gyroX, 3);     Serial.print(",");
+  Serial.print("g_sineWave=");  Serial.print(g_sineWave, 2);  Serial.print(",");
+  Serial.print("g_squareWave=");Serial.print(g_squareWave, 2);Serial.print(",");
+  Serial.print("g_sawtoothWave=");Serial.print(g_sawtoothWave,2);Serial.print(",");
+  Serial.print("g_temperature=");Serial.print(g_temperature, 2);Serial.print(",");
+  Serial.print("g_heapFree=");  Serial.print(g_heapFree, 0);  Serial.print(",");
+  Serial.print("g_ledState=");  Serial.println(g_ledState);
+}
+
+// ─────────────────────────────────────────────────────
+//  Command Handler
+// ─────────────────────────────────────────────────────
+void handleCommand(const String& cmd) {
+
+  if (cmd == "PING") {
+    Serial.println("OK:PONG");
+
+  } else if (cmd == "STATUS") {
+    Serial.print("OK:STATUS:heap="); Serial.print(ESP.getFreeHeap());
+    Serial.print(",cpu="); Serial.print(getCpuFrequencyMhz());
+    Serial.print(",uptime="); Serial.print(millis());
+    Serial.print(",trace="); Serial.println(traceStreaming ? "1" : "0");
+
+  } else if (cmd == "TRACE_START") {
+    traceStreaming = true;
+    lastTraceMs = 0;
+    Serial.println("OK:TRACE streaming started at 20Hz");
+
+  } else if (cmd == "TRACE_STOP") {
+    traceStreaming = false;
+    Serial.println("OK:TRACE streaming stopped");
+
+  } else if (cmd.startsWith("PEEK:")) {
+    // Format: PEEK:<hexAddr>:<numBytes>
+    // e.g.   PEEK:3FFB1234:4
+    int sep = cmd.indexOf(':', 5);
+    if (sep < 0) { Serial.println("ERR:PEEK format: PEEK:<hexAddr>:<numBytes>"); return; }
+    String addrStr = cmd.substring(5, sep);
+    uint8_t numBytes = (uint8_t)cmd.substring(sep + 1).toInt();
+    if (numBytes < 1 || numBytes > 64) numBytes = 4;
+
+    uint32_t addr = (uint32_t)strtoul(addrStr.c_str(), nullptr, 16);
+
+    // Safety: only allow reads from DRAM region (0x3FF80000 - 0x3FFFFFFF)
+    // and IRAM (0x40000000 - 0x4009FFFF) on ESP32S3 SRAM is 0x3FC80000–0x3FCFFFFF
+    // Permissive check: just ensure it's in the ESP32 address space
+    if (addr < 0x20000000 || addr > 0x60000000) {
+      Serial.print("ERR:PEEK address out of safe range: 0x"); Serial.println(addrStr);
+      return;
+    }
+
+    Serial.print("PEEK_RESULT:"); Serial.print(addrStr); Serial.print(":");
+    uint8_t* ptr = (uint8_t*)addr;
+    for (uint8_t i = 0; i < numBytes; i++) {
+      char hex[4];
+      snprintf(hex, sizeof(hex), "%02X", ptr[i]);
+      Serial.print(hex);
+      if (i < numBytes - 1) Serial.print(" ");
+    }
+    Serial.println();
+
+  } else if (cmd.startsWith("SET:")) {
+    // Format: SET:<hexAddr>:<hexValue> (1-4 bytes, no spaces)
+    // e.g.   SET:3FFB1234:0000803F  (writes float 1.0f)
+    int sep = cmd.indexOf(':', 4);
+    if (sep < 0) { Serial.println("ERR:SET format: SET:<hexAddr>:<hexBytes>"); return; }
+    String addrStr = cmd.substring(4, sep);
+    String valStr  = cmd.substring(sep + 1);
+
+    uint32_t addr = (uint32_t)strtoul(addrStr.c_str(), nullptr, 16);
+    if (addr < 0x20000000 || addr > 0x60000000) {
+      Serial.println("ERR:SET address out of safe range"); return;
+    }
+
+    // Parse hex bytes (no spaces, pairs)
+    uint8_t* ptr = (uint8_t*)addr;
+    for (int i = 0; i + 1 < (int)valStr.length(); i += 2) {
+      char byteStr[3] = { valStr[i], valStr[i+1], 0 };
+      ptr[i / 2] = (uint8_t)strtoul(byteStr, nullptr, 16);
+    }
+    Serial.print("OK:SET 0x"); Serial.print(addrStr);
+    Serial.print(" = "); Serial.println(valStr);
+
+  } else if (cmd == "SYMBOLS") {
+    // Print symbol addresses for variables (useful if no .elf available)
+    printSymbolHints();
+
+  } else {
+    Serial.print("ERR:Unknown command: "); Serial.println(cmd);
+  }
+}
+
+// ─────────────────────────────────────────────────────
+//  Print symbol addresses — use if you can't parse .elf
+//  The webpage can also read these to build a variable list.
+// ─────────────────────────────────────────────────────
+void printSymbolHints() {
+  Serial.println("SYMBOLS_START");
+  // Format: SYM:<name>:<hexAddr>:<type>:<size>
+  // type: f=float, i=int32, u=uint8, d=double
+  printSym("g_accelX",       (uint32_t)&g_accelX,       "f", 4);
+  printSym("g_accelY",       (uint32_t)&g_accelY,       "f", 4);
+  printSym("g_accelZ",       (uint32_t)&g_accelZ,       "f", 4);
+  printSym("g_gyroX",        (uint32_t)&g_gyroX,        "f", 4);
+  printSym("g_gyroY",        (uint32_t)&g_gyroY,        "f", 4);
+  printSym("g_gyroZ",        (uint32_t)&g_gyroZ,        "f", 4);
+  printSym("g_temperature",  (uint32_t)&g_temperature,  "f", 4);
+  printSym("g_counter",      (uint32_t)&g_counter,      "i", 4);
+  printSym("g_sineWave",     (uint32_t)&g_sineWave,     "f", 4);
+  printSym("g_squareWave",   (uint32_t)&g_squareWave,   "f", 4);
+  printSym("g_sawtoothWave", (uint32_t)&g_sawtoothWave, "f", 4);
+  printSym("g_heapFree",     (uint32_t)&g_heapFree,     "f", 4);
+  printSym("g_ledState",     (uint32_t)&g_ledState,     "u", 1);
+  Serial.println("SYMBOLS_END");
+}
+
+void printSym(const char* name, uint32_t addr, const char* type, uint8_t size) {
+  Serial.print("SYM:");
+  Serial.print(name);
+  Serial.print(":");
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%08X", addr);
+  Serial.print(buf);
+  Serial.print(":");
+  Serial.print(type);
+  Serial.print(":");
+  Serial.println(size);
+}
+
+// END OF SKETCH
+// ──────────────────────────────────────────────────────
+// To adapt for real IMU (uncomment Wire/LSM6DS3 includes above):
+//
+//   g_accelX = imu.readFloatAccelX();
+//   g_accelY = imu.readFloatAccelY();
+//   g_accelZ = imu.readFloatAccelZ();
+//   g_gyroX  = imu.readFloatGyroX();
+//   g_gyroY  = imu.readFloatGyroY();
+//   g_gyroZ  = imu.readFloatGyroZ();
+//   g_temperature = imu.readTempC();
+//
+// The webpage works identically — variable names flow through
+// both the TRACE stream and the ELF symbol lookup.
