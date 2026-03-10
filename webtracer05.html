@@ -1,0 +1,1959 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 Variable Tracer</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap');
+
+  :root {
+    --bg:        #0a0c0f;
+    --bg2:       #0f1318;
+    --bg3:       #141a22;
+    --panel:     #111820;
+    --border:    #1e2d3d;
+    --border2:   #2a3f56;
+    --accent:    #00d4ff;
+    --accent2:   #00ff99;
+    --accent3:   #ff6b35;
+    --accent4:   #c084fc;
+    --warn:      #ffcc00;
+    --danger:    #ff3355;
+    --text:      #c8dce8;
+    --text2:     #6a8fa8;
+    --text3:     #3a5a72;
+    --mono:      'Share Tech Mono', monospace;
+    --sans:      'Barlow Condensed', sans-serif;
+    --glow:      0 0 12px rgba(0,212,255,0.35);
+    --glow2:     0 0 20px rgba(0,255,153,0.25);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* ── Scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Layout ── */
+  #app {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    grid-template-columns: 280px 1fr 300px;
+    height: 100vh;
+    gap: 0;
+  }
+
+  /* ── Header ── */
+  #header {
+    grid-column: 1 / -1;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 20px;
+    position: relative;
+  }
+  #header::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), var(--accent2), transparent);
+  }
+  .logo {
+    font-family: var(--sans);
+    font-weight: 900;
+    font-size: 18px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    text-shadow: var(--glow);
+  }
+  .logo span { color: var(--accent2); }
+
+  .header-status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+  }
+  .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--text3);
+    transition: all 0.3s;
+  }
+  .dot.connected { background: var(--accent2); box-shadow: 0 0 8px var(--accent2); }
+  .dot.streaming { background: var(--accent); box-shadow: 0 0 8px var(--accent); animation: pulse 0.8s infinite; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .header-btns { display: flex; gap: 8px; margin-left: auto; }
+  .btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 14px;
+    border: 1px solid var(--border2);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    transition: all 0.15s;
+    border-radius: 2px;
+  }
+  .btn:hover  { border-color: var(--accent); color: var(--accent); box-shadow: var(--glow); }
+  .btn.active { border-color: var(--accent2); color: var(--accent2); background: rgba(0,255,153,0.08); box-shadow: var(--glow2); }
+  .btn.danger { border-color: var(--danger); color: var(--danger); }
+  .btn.danger:hover { background: rgba(255,51,85,0.1); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  select.btn {
+    appearance: none;
+    -webkit-appearance: none;
+    padding-right: 20px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236a8fa8'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+  }
+
+  /* ── Left panel: Variable list ── */
+  #left-panel {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-title {
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 10px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 10px 14px 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .panel-title .badge {
+    background: var(--border2);
+    color: var(--text2);
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    margin-left: auto;
+  }
+
+  /* ELF upload zone */
+  #elf-zone {
+    margin: 10px;
+    border: 1px dashed var(--border2);
+    border-radius: 4px;
+    padding: 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+  #elf-zone:hover, #elf-zone.drag { border-color: var(--accent4); background: rgba(192,132,252,0.05); }
+  #elf-zone.loaded { border-color: var(--accent2); border-style: solid; background: rgba(0,255,153,0.04); }
+  #elf-zone p { font-size: 10px; color: var(--text2); font-family: var(--mono); line-height: 1.6; pointer-events: none; }
+  #elf-zone .elf-icon { font-size: 22px; margin-bottom: 4px; }
+  #elf-file-input { display: none; }
+
+  /* Variable list */
+  #var-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  #var-list::-webkit-scrollbar { width: 4px; }
+  #var-list::-webkit-scrollbar-track { background: transparent; }
+  #var-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+
+  .var-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 14px;
+    gap: 8px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: all 0.12s;
+    position: relative;
+  }
+  .var-item:hover { background: rgba(255,255,255,0.03); }
+  .var-item.active { border-left-color: var(--accent); background: rgba(0,212,255,0.05); }
+  .var-item.plotted { border-left-color: var(--accent2); }
+
+  .var-color-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .var-name {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    flex: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .var-value {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent2);
+    min-width: 60px;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .var-type-badge {
+    font-size: 8px;
+    padding: 1px 4px;
+    border-radius: 2px;
+    background: var(--border);
+    color: var(--text3);
+    font-family: var(--mono);
+    flex-shrink: 0;
+  }
+
+  .var-addr {
+    font-size: 9px;
+    color: var(--text3);
+    font-family: var(--mono);
+    white-space: nowrap;
+  }
+
+  .source-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+  }
+  .source-tab {
+    flex: 1;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 1px;
+    padding: 7px 4px;
+    text-align: center;
+    cursor: pointer;
+    color: var(--text3);
+    border-bottom: 2px solid transparent;
+    text-transform: uppercase;
+    transition: all 0.15s;
+  }
+  .source-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .source-tab:hover { color: var(--text2); }
+
+  /* ── Center: Oscilloscope ── */
+  #center-panel {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: var(--bg);
+  }
+
+  #scope-toolbar {
+    display: flex;
+    align-items: center;
+    padding: 6px 12px;
+    gap: 8px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    flex-shrink: 0;
+  }
+  .scope-label {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text2);
+  }
+
+  #scope-canvas-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    background: #070a0d;
+  }
+  #scope-canvas {
+    position: absolute;
+    inset: 0;
+  }
+
+  .scope-overlay {
+    position: absolute;
+    top: 10px; right: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    pointer-events: none;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 10px;
+  }
+  .legend-color {
+    width: 20px; height: 2px;
+    border-radius: 1px;
+  }
+
+  /* time/div controls */
+  .scope-stat {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text3);
+    padding: 3px 8px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+  }
+
+  /* ── Terminal at bottom of center ── */
+  #terminal-wrap {
+    height: 160px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+  }
+  #terminal-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+    flex-shrink: 0;
+  }
+  #terminal-title span {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  #terminal-output {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 12px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+    background: var(--bg);
+  }
+  #terminal-output::-webkit-scrollbar { width: 4px; }
+  #terminal-output::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  .log-ok     { color: var(--accent2); }
+  .log-err    { color: var(--danger); }
+  .log-warn   { color: var(--warn); }
+  .log-trace  { color: var(--accent); }
+  .log-peek   { color: var(--accent4); }
+  .log-info   { color: var(--text2); }
+  .log-sym    { color: #e2b96e; }
+  .log-ts     { color: var(--text3); margin-right: 8px; }
+
+  #terminal-input-row {
+    display: flex;
+    gap: 0;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  #terminal-input {
+    flex: 1;
+    background: var(--bg2);
+    border: none;
+    border-right: 1px solid var(--border);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 7px 12px;
+    outline: none;
+  }
+  #terminal-input::placeholder { color: var(--text3); }
+  #terminal-send {
+    background: var(--border);
+    border: none;
+    color: var(--text2);
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 0 14px;
+    cursor: pointer;
+    letter-spacing: 1px;
+    transition: all 0.15s;
+  }
+  #terminal-send:hover { background: var(--accent); color: var(--bg); }
+
+  /* ── Right panel: variable detail + PEEK ── */
+  #right-panel {
+    background: var(--panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .detail-section {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .detail-label {
+    font-family: var(--sans);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--text3);
+    margin-bottom: 8px;
+  }
+
+  .detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 3px 0;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .detail-row .dk { color: var(--text3); }
+  .detail-row .dv { color: var(--text); }
+  .detail-row .dv.accent { color: var(--accent); }
+  .detail-row .dv.accent2 { color: var(--accent2); font-size: 14px; font-weight: bold; }
+
+  /* big value display */
+  .big-value {
+    font-family: var(--mono);
+    font-size: 28px;
+    color: var(--accent2);
+    text-shadow: var(--glow2);
+    text-align: center;
+    padding: 8px 0 4px;
+    letter-spacing: 1px;
+  }
+  .big-value-name {
+    text-align: center;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text2);
+    margin-bottom: 4px;
+  }
+
+  /* mini sparkline */
+  #spark-canvas {
+    width: 100%;
+    height: 50px;
+    display: block;
+  }
+
+  /* PEEK section */
+  .peek-row {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+  .peek-input {
+    flex: 1;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 5px 8px;
+    border-radius: 2px;
+    outline: none;
+  }
+  .peek-input:focus { border-color: var(--accent); }
+  .peek-input::placeholder { color: var(--text3); }
+
+  .peek-result {
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    border-radius: 2px;
+    min-height: 32px;
+    word-break: break-all;
+    color: var(--accent4);
+    line-height: 1.6;
+  }
+  .peek-interpret {
+    font-size: 10px;
+    color: var(--text2);
+    margin-top: 4px;
+  }
+
+  /* Plot checkbox */
+  .plot-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    padding: 4px 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text2);
+    user-select: none;
+  }
+  .plot-toggle input { display: none; }
+  .toggle-track {
+    width: 30px; height: 16px;
+    background: var(--border);
+    border-radius: 8px;
+    position: relative;
+    transition: background 0.2s;
+  }
+  .plot-toggle input:checked + .toggle-track { background: var(--accent2); }
+  .toggle-thumb {
+    width: 12px; height: 12px;
+    background: white;
+    border-radius: 50%;
+    position: absolute;
+    top: 2px; left: 2px;
+    transition: left 0.2s;
+  }
+  .plot-toggle input:checked + .toggle-track .toggle-thumb { left: 16px; }
+
+  /* Stats mini-grid */
+  .stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .stat-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    padding: 6px 8px;
+    border-radius: 2px;
+  }
+  .stat-box .sk { font-size: 9px; color: var(--text3); font-family: var(--mono); text-transform: uppercase; letter-spacing: 1px; }
+  .stat-box .sv { font-size: 13px; color: var(--accent); font-family: var(--mono); }
+
+  /* Scrollable right panel body */
+  #right-scroll {
+    flex: 1;
+    overflow-y: auto;
+  }
+  #right-scroll::-webkit-scrollbar { width: 3px; }
+  #right-scroll::-webkit-scrollbar-thumb { background: var(--border2); }
+
+  /* source indicator */
+  .src-badge {
+    font-size: 8px;
+    padding: 1px 5px;
+    border-radius: 8px;
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-left: 4px;
+  }
+  .src-trace { background: rgba(0,212,255,0.15); color: var(--accent); }
+  .src-elf   { background: rgba(192,132,252,0.15); color: var(--accent4); }
+  .src-sym   { background: rgba(255,107,53,0.15); color: var(--accent3); }
+  .src-peek  { background: rgba(0,255,153,0.15); color: var(--accent2); }
+
+  /* connection section in header */
+  .conn-section {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    border-left: 1px solid var(--border);
+    height: 100%;
+  }
+
+  /* empty state */
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text3);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 24px;
+    text-align: center;
+    flex: 1;
+  }
+  .empty-state .es-icon { font-size: 32px; opacity: 0.3; }
+
+  /* horizontal divider */
+  .hdiv {
+    height: 1px;
+    background: var(--border);
+    margin: 0;
+  }
+
+  /* tooltip */
+  .tooltip-wrap { position: relative; }
+  .tooltip-wrap:hover .tooltip { display: block; }
+  .tooltip {
+    display: none;
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg3);
+    border: 1px solid var(--border2);
+    padding: 4px 8px;
+    font-size: 10px;
+    font-family: var(--mono);
+    white-space: nowrap;
+    color: var(--text);
+    z-index: 100;
+    pointer-events: none;
+    border-radius: 2px;
+  }
+
+  /* rate display */
+  #rate-display {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text3);
+    margin-left: auto;
+  }
+
+  #elf-stats {
+    padding: 4px 8px;
+    font-size: 9px;
+    color: var(--text3);
+    font-family: var(--mono);
+    text-align: center;
+  }
+
+  /* Var group headers */
+  .var-group-header {
+    font-family: var(--sans);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 8px 14px 4px;
+  }
+
+  /* Responsive: collapse right panel on narrow screens */
+  @media (max-width: 900px) {
+    #app { grid-template-columns: 240px 1fr; }
+    #right-panel { display: none; }
+  }
+  @media (max-width: 600px) {
+    #app { grid-template-columns: 1fr; }
+    #left-panel { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ══════════════════ HEADER ══════════════════ -->
+  <header id="header">
+    <div class="logo">ESP32<span>·TRACE</span></div>
+
+    <div class="conn-section">
+      <div class="dot" id="conn-dot"></div>
+      <span class="header-status" id="conn-label">DISCONNECTED</span>
+    </div>
+    <div class="logo">Github<span> <a href="https://github.com/hpssjellis/xiaoml-kit-webserial-variable-trace">xiaoml-kit-webserial-variable-trace</a></span></div>
+    <div class="header-btns">
+      <select class="btn" id="baud-select">
+        <option value="9600">9600</option>
+        <option value="57600">57600</option>
+        <option value="115200" selected>115200</option>
+        <option value="230400">230400</option>
+        <option value="921600">921600</option>
+      </select>
+      <button class="btn" id="btn-connect">▶ CONNECT</button>
+      <button class="btn" id="btn-disconnect" disabled>■ DISCONNECT</button>
+      <button class="btn" id="btn-trace" disabled>⬤ TRACE</button>
+      <button class="btn" id="btn-symbols" disabled>SYMBOLS</button>
+      <button class="btn" id="btn-clear-plots">✕ CLEAR</button>
+    </div>
+
+    <div id="rate-display">— pts/s</div>
+  </header>
+
+  <!-- ══════════════════ LEFT PANEL ══════════════════ -->
+  <aside id="left-panel">
+    <div class="panel-title">
+      VARIABLES
+      <span class="badge" id="var-count-badge">0</span>
+    </div>
+
+    <div class="source-tabs">
+      <div class="source-tab active" data-tab="all"  onclick="setVarTab('all')">ALL</div>
+      <div class="source-tab" data-tab="trace" onclick="setVarTab('trace')">TRACE</div>
+      <div class="source-tab" data-tab="elf"   onclick="setVarTab('elf')">ELF</div>
+      <div class="source-tab" data-tab="sym"   onclick="setVarTab('sym')">SYM</div>
+    </div>
+
+    <!-- ELF upload zone -->
+    <div id="elf-zone" onclick="document.getElementById('elf-file-input').click()"
+         ondragover="elfDragOver(event)" ondrop="elfDrop(event)" ondragleave="elfDragLeave(event)">
+      <div class="elf-icon">🔬</div>
+      <p id="elf-status-text">Drop <strong>.elf</strong> file here<br>or click to browse<br><span style="color:var(--text3);font-size:9px">Arduino IDE: Sketch → Export Compiled Binary</span></p>
+    </div>
+    <div id="elf-stats"></div>
+    <input type="file" id="elf-file-input" accept=".elf,.axf,*" onchange="handleElfFile(this.files[0])">
+
+    <div id="var-list">
+      <div class="empty-state">
+        <div class="es-icon">📡</div>
+        Connect device &amp; start TRACE<br>or upload .elf file
+      </div>
+    </div>
+  </aside>
+
+  <!-- ══════════════════ CENTER PANEL ══════════════════ -->
+  <main id="center-panel">
+    <div id="scope-toolbar">
+      <span class="scope-label">OSCILLOSCOPE</span>
+      <div class="scope-stat" id="scope-time-stat">window: 10s</div>
+      <button class="btn" onclick="changeScopeWindow(-1)">◀ ZOOM</button>
+      <button class="btn" onclick="changeScopeWindow(1)">ZOOM ▶</button>
+      <button class="btn" onclick="togglePause()" id="btn-pause">⏸ PAUSE</button>
+      <button class="btn" onclick="exportCSV()">↓ CSV</button>
+      <div class="scope-overlay" id="scope-legend"></div>
+    </div>
+
+    <div id="scope-canvas-wrap">
+      <canvas id="scope-canvas"></canvas>
+      <div id="scope-placeholder" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none">
+        <div style="text-align:center;color:var(--text3);font-family:var(--mono);font-size:12px">
+          <div style="font-size:48px;opacity:0.1;margin-bottom:12px">〰</div>
+          SELECT VARIABLES TO PLOT
+        </div>
+      </div>
+    </div>
+
+    <div id="terminal-wrap">
+      <div id="terminal-title">
+        <span>SERIAL TERMINAL</span>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn" onclick="clearTerminal()" style="padding:2px 8px;font-size:9px">CLR</button>
+          <label style="display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:var(--text3);cursor:pointer">
+            <input type="checkbox" id="chk-autoscroll" checked style="accent-color:var(--accent)"> AUTO↓
+          </label>
+          <label style="display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px;color:var(--text3);cursor:pointer">
+            <input type="checkbox" id="chk-show-trace" style="accent-color:var(--accent)"> SHOW TRACE
+          </label>
+        </div>
+      </div>
+      <div id="terminal-output"></div>
+      <div id="terminal-input-row">
+        <input type="text" id="terminal-input" placeholder="type command… (PING, STATUS, TRACE_START, PEEK:3FFC0000:4)" autocomplete="off" spellcheck="false">
+        <button id="terminal-send" onclick="sendCommand()">SEND</button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ══════════════════ RIGHT PANEL ══════════════════ -->
+  <aside id="right-panel">
+    <div class="panel-title">INSPECTOR</div>
+
+    <div id="right-scroll">
+
+      <!-- Selected variable detail -->
+      <div class="detail-section" id="detail-section">
+        <div class="detail-label">SELECTED VARIABLE</div>
+        <div id="no-selection" style="color:var(--text3);font-family:var(--mono);font-size:11px">
+          — click a variable to inspect —
+        </div>
+        <div id="var-detail" style="display:none">
+          <div class="big-value-name" id="dv-name">g_accelX</div>
+          <div class="big-value" id="dv-value">—</div>
+          <canvas id="spark-canvas"></canvas>
+          <div class="stats-grid" id="dv-stats-grid">
+            <div class="stat-box"><div class="sk">MIN</div><div class="sv" id="dv-min">—</div></div>
+            <div class="stat-box"><div class="sk">MAX</div><div class="sv" id="dv-max">—</div></div>
+            <div class="stat-box"><div class="sk">AVG</div><div class="sv" id="dv-avg">—</div></div>
+            <div class="stat-box"><div class="sk">STD</div><div class="sv" id="dv-std">—</div></div>
+          </div>
+          <div style="margin-top:8px">
+            <div class="detail-row"><span class="dk">Address</span><span class="dv accent" id="dv-addr">—</span></div>
+            <div class="detail-row"><span class="dk">Type</span><span class="dv" id="dv-type">—</span></div>
+            <div class="detail-row"><span class="dk">Size</span><span class="dv" id="dv-size">—</span></div>
+            <div class="detail-row"><span class="dk">Source</span><span class="dv" id="dv-source">—</span></div>
+          </div>
+          <div style="margin-top:10px">
+            <label class="plot-toggle" onclick="toggleVarPlot()">
+              <input type="checkbox" id="chk-plot">
+              <div class="toggle-track"><div class="toggle-thumb"></div></div>
+              Plot on oscilloscope
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- PEEK tool -->
+      <div class="detail-section">
+        <div class="detail-label">MEMORY PEEK (DIRECT READ)</div>
+        <div class="peek-row">
+          <input type="text" class="peek-input" id="peek-addr" placeholder="3FFC0000" maxlength="8" style="width:90px">
+          <input type="text" class="peek-input" id="peek-len"  placeholder="4" maxlength="3" style="width:44px">
+          <button class="btn" style="padding:5px 8px" onclick="doPeek()">PEEK</button>
+        </div>
+        <div style="font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:6px">addr (hex) · bytes</div>
+        <div class="peek-result" id="peek-result">—</div>
+        <div class="peek-interpret" id="peek-interpret"></div>
+      </div>
+
+      <!-- SET tool -->
+      <div class="detail-section">
+        <div class="detail-label">MEMORY SET (WRITE)</div>
+        <div class="peek-row">
+          <input type="text" class="peek-input" id="set-addr" placeholder="3FFC0000" style="width:90px">
+          <input type="text" class="peek-input" id="set-val"  placeholder="0000803F" style="flex:1">
+          <button class="btn" style="padding:5px 8px" onclick="doSet()">SET</button>
+        </div>
+        <div style="font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:4px">
+          addr · hex bytes (e.g. 0000803F = float 1.0)
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn" style="padding:3px 6px;font-size:9px" onclick="setValPreset('3F800000')">float 1.0</button>
+          <button class="btn" style="padding:3px 6px;font-size:9px" onclick="setValPreset('00000000')">float 0.0</button>
+          <button class="btn" style="padding:3px 6px;font-size:9px" onclick="setValPreset('C2C80000')">float -100</button>
+          <button class="btn" style="padding:3px 6px;font-size:9px" onclick="setValPreset('42C80000')">float 100</button>
+        </div>
+      </div>
+
+      <!-- Auto-PEEK polling -->
+      <div class="detail-section">
+        <div class="detail-label">AUTO-POLL</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--text2);margin-bottom:6px">
+          Poll a PEEK address at fixed interval and plot the result.
+        </div>
+        <div class="peek-row">
+          <input type="text" class="peek-input" id="poll-addr" placeholder="3FFC0000">
+          <select class="peek-input" id="poll-type" style="width:60px">
+            <option value="f32">f32</option>
+            <option value="i32">i32</option>
+            <option value="u8">u8</option>
+            <option value="u16">u16</option>
+          </select>
+        </div>
+        <div style="margin-bottom:6px">
+          <input type="text" class="peek-input" id="poll-name" placeholder="var_name" style="width:100%">
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn" onclick="startAutoPoll()" id="btn-start-poll">▶ POLL</button>
+          <button class="btn" onclick="stopAutoPoll()" id="btn-stop-poll" disabled>■ STOP</button>
+        </div>
+      </div>
+
+      <!-- ELF info -->
+      <div class="detail-section" id="elf-info-section" style="display:none">
+        <div class="detail-label">ELF FILE INFO</div>
+        <div class="detail-row"><span class="dk">File</span><span class="dv" id="elf-filename" style="font-size:10px;max-width:160px;overflow:hidden;text-overflow:ellipsis">—</span></div>
+        <div class="detail-row"><span class="dk">Arch</span><span class="dv" id="elf-arch">—</span></div>
+        <div class="detail-row"><span class="dk">Symbols</span><span class="dv accent" id="elf-sym-count">—</span></div>
+        <div class="detail-row"><span class="dk">Text base</span><span class="dv" id="elf-text-base">—</span></div>
+        <div class="detail-row"><span class="dk">Data base</span><span class="dv" id="elf-data-base">—</span></div>
+      </div>
+
+      <!-- Servo control panel -->
+      <div class="detail-section">
+        <div class="detail-label">🔧 SERVO MOTOR — D2</div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:8px;line-height:1.6">
+          red→5-6V · brown→GND+board GND · orange→D2
+        </div>
+
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <button class="btn" onclick="servoCmd('SERVO_ATTACH')" id="btn-sv-attach">⚡ ATTACH</button>
+          <button class="btn" onclick="servoCmd('SERVO_DETACH')" id="btn-sv-detach">✕ DETACH</button>
+        </div>
+
+        <div class="detail-label" style="margin-bottom:4px">POSITION</div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <input type="range" id="servo-slider" min="0" max="180" value="90"
+            style="flex:1;accent-color:var(--accent3)"
+            oninput="servoSliderMove(this.value)" onchange="servoSliderSet(this.value)">
+          <span id="servo-angle-display" style="font-family:var(--mono);font-size:14px;color:var(--accent3);min-width:38px;text-align:right">90°</span>
+        </div>
+        <div style="display:flex;gap:4px;margin-bottom:10px;flex-wrap:wrap">
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(0)">0°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(20)">20°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(45)">45°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(90)">90°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(135)">135°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(160)">160°</button>
+          <button class="btn" style="padding:3px 8px;font-size:10px" onclick="servoPreset(180)">180°</button>
+        </div>
+
+        <div class="detail-label" style="margin-bottom:6px">SWEEP</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;margin-bottom:6px">
+          <div>
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:2px">FROM°</div>
+            <input type="number" class="peek-input" id="sweep-from" value="20" min="0" max="180" style="width:100%;text-align:center">
+          </div>
+          <div>
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:2px">TO°</div>
+            <input type="number" class="peek-input" id="sweep-to" value="160" min="0" max="180" style="width:100%;text-align:center">
+          </div>
+          <div>
+            <div style="font-size:9px;color:var(--text3);font-family:var(--mono);margin-bottom:2px">ms/step</div>
+            <input type="number" class="peek-input" id="sweep-step" value="25" min="5" max="500" style="width:100%;text-align:center">
+          </div>
+        </div>
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <button class="btn" onclick="servoSweepStart()" id="btn-sv-sweep">▶ SWEEP</button>
+          <button class="btn" onclick="servoCmd('SERVO_STOP')" id="btn-sv-stop">■ STOP</button>
+        </div>
+
+        <!-- PWM pulse visualiser -->
+        <div class="detail-label" style="margin-bottom:4px">PWM PULSE WIDTH</div>
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:2px;padding:6px 6px 22px;height:50px;position:relative;overflow:hidden" id="pwm-bar-wrap">
+          <div style="font-size:9px;color:var(--text3);font-family:var(--mono);position:absolute;top:4px;left:6px">500µs · 0°</div>
+          <div style="font-size:9px;color:var(--text3);font-family:var(--mono);position:absolute;top:4px;right:6px">2500µs · 180°</div>
+          <div id="pwm-bar" style="position:absolute;bottom:6px;left:6px;height:12px;width:50%;background:var(--accent3);border-radius:1px;transition:width 0.08s linear;box-shadow:0 0 8px var(--accent3)"></div>
+          <div id="pwm-label" style="position:absolute;bottom:7px;left:8px;font-family:var(--mono);font-size:9px;color:#000;pointer-events:none;font-weight:bold">1500µs</div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:4px;font-family:var(--mono);font-size:9px;color:var(--text3)">
+          <span>period: 20 ms (50 Hz)</span>
+          <span id="pwm-duty">duty: 7.5%</span>
+        </div>
+
+      </div><!-- servo panel -->
+
+    </div><!-- right-scroll -->
+  </aside>
+
+</div><!-- app -->
+
+<script>
+'use strict';
+
+// ─────────────────────────────────────────────────────────────────────────
+//  GLOBAL STATE
+// ─────────────────────────────────────────────────────────────────────────
+let port = null, reader = null, writer = null;
+let connected = false;
+let traceStreaming = false;
+
+const variables = new Map();  // name → { name, value, addr, type, size, source, history[], color, plotted }
+let selectedVar = null;
+let varTab = 'all';
+
+const MAX_HISTORY = 2000;
+const PLOT_COLORS = [
+  '#00d4ff','#00ff99','#ff6b35','#c084fc','#ffcc00',
+  '#ff3355','#4ade80','#f472b6','#fb923c','#38bdf8'
+];
+let colorIdx = 0;
+
+let scopePaused = false;
+const scopeWindows = [2, 5, 10, 20, 30, 60];
+let scopeWindowIdx = 2;  // 10s default
+
+let pointsPerSec = 0, ptCount = 0, ptTimer = 0;
+
+let autoPollTimer = null;
+let autoPollVarName = null;
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SERIAL CONNECTION
+// ─────────────────────────────────────────────────────────────────────────
+document.getElementById('btn-connect').addEventListener('click', connectSerial);
+document.getElementById('btn-disconnect').addEventListener('click', disconnectSerial);
+document.getElementById('btn-trace').addEventListener('click', toggleTrace);
+document.getElementById('btn-symbols').addEventListener('click', () => sendSerial('SYMBOLS'));
+document.getElementById('btn-clear-plots').addEventListener('click', clearAllPlots);
+
+document.getElementById('terminal-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendCommand();
+});
+
+async function connectSerial() {
+  if (!('serial' in navigator)) {
+    logTerminal('ERR:WebSerial not supported. Use Chrome/Edge on HTTPS or localhost.', 'err');
+    return;
+  }
+  try {
+    port = await navigator.serial.requestPort();
+    const baud = parseInt(document.getElementById('baud-select').value);
+    await port.open({ baudRate: baud });
+    connected = true;
+    setConnected(true);
+    logTerminal(`OK:Connected at ${baud} baud`, 'ok');
+    readLoop();
+  } catch(e) {
+    logTerminal('ERR:' + e.message, 'err');
+  }
+}
+
+async function disconnectSerial() {
+  traceStreaming = false;
+  updateTraceBtn();
+  try {
+    if (reader) { await reader.cancel(); reader = null; }
+    if (port)   { await port.close();   port = null; }
+  } catch(e) {}
+  connected = false;
+  setConnected(false);
+  logTerminal('OK:Disconnected', 'ok');
+}
+
+function setConnected(v) {
+  const dot = document.getElementById('conn-dot');
+  const lbl = document.getElementById('conn-label');
+  dot.className = 'dot' + (v ? ' connected' : '');
+  lbl.textContent = v ? 'CONNECTED' : 'DISCONNECTED';
+  document.getElementById('btn-connect').disabled = v;
+  document.getElementById('btn-disconnect').disabled = !v;
+  document.getElementById('btn-trace').disabled = !v;
+  document.getElementById('btn-symbols').disabled = !v;
+}
+
+async function readLoop() {
+  const decoder = new TextDecoderStream();
+  port.readable.pipeTo(decoder.writable);
+  reader = decoder.readable.getReader();
+  let buf = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += value;
+      let nl;
+      while ((nl = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
+        buf = buf.slice(nl + 1);
+        parseLine(line);
+      }
+    }
+  } catch(e) {
+    if (connected) logTerminal('ERR:Serial read error: ' + e.message, 'err');
+  }
+}
+
+async function sendSerial(text) {
+  if (!connected || !port || !port.writable) { logTerminal('ERR:Not connected', 'err'); return; }
+  const enc = new TextEncoderStream();
+  enc.readable.pipeTo(port.writable, { preventClose: true });
+  const w = enc.writable.getWriter();
+  await w.write(text + '\n');
+  w.close();
+  logTerminal('→ ' + text, 'info');
+}
+
+function sendCommand() {
+  const input = document.getElementById('terminal-input');
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  sendSerial(cmd);
+  input.value = '';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  LINE PARSER
+// ─────────────────────────────────────────────────────────────────────────
+let symParsing = false, symBuffer = [];
+
+function parseLine(line) {
+  if (!line) return;
+
+  // TRACE line
+  if (line.startsWith('TRACE:')) {
+    const showTrace = document.getElementById('chk-show-trace').checked;
+    if (showTrace) logTerminal(line, 'trace');
+    parseTraceLine(line.slice(6));
+    // rate counting
+    ptCount++;
+    const now = Date.now();
+    if (now - ptTimer >= 1000) {
+      pointsPerSec = ptCount;
+      ptCount = 0;
+      ptTimer = now;
+      document.getElementById('rate-display').textContent = pointsPerSec + ' pts/s';
+    }
+    return;
+  }
+
+  // PEEK_RESULT
+  if (line.startsWith('PEEK_RESULT:')) {
+    logTerminal(line, 'peek');
+    parsePeekResult(line.slice(12));
+    return;
+  }
+
+  // SYMBOLS_START / SYM: / SYMBOLS_END
+  if (line === 'SYMBOLS_START') { symParsing = true; symBuffer = []; return; }
+  if (line === 'SYMBOLS_END') {
+    symParsing = false;
+    processSYMBlock(symBuffer);
+    return;
+  }
+  if (symParsing && line.startsWith('SYM:')) {
+    symBuffer.push(line.slice(4));
+    return;
+  }
+
+  // Generic log
+  const cls = line.startsWith('ERR:') ? 'err' :
+              line.startsWith('OK:')  ? 'ok'  :
+              line.startsWith('WARN:')?'warn' : 'info';
+  logTerminal(line, cls);
+}
+
+function _parseTraceLineCore(data) {
+  const pairs = data.split(',');
+  const now = Date.now();
+  for (const pair of pairs) {
+    const eq = pair.indexOf('=');
+    if (eq < 0) continue;
+    const name  = pair.slice(0, eq).trim();
+    const valStr = pair.slice(eq + 1).trim();
+    const value  = parseFloat(valStr);
+    if (isNaN(value)) continue;
+
+    if (!variables.has(name)) {
+      addVariable(name, { source: 'trace', type: 'f32', size: 4, addr: null });
+    }
+    const v = variables.get(name);
+    v.value = value;
+    v.history.push({ t: now, v: value });
+    if (v.history.length > MAX_HISTORY) v.history.shift();
+    v.lastUpdate = now;
+  }
+  refreshVarList();
+  refreshRightPanel();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SYMBOL TABLE FROM SERIAL (SYMBOLS command)
+// ─────────────────────────────────────────────────────────────────────────
+function processSYMBlock(lines) {
+  let count = 0;
+  for (const line of lines) {
+    // Format: name:hexAddr:type:size
+    const parts = line.split(':');
+    if (parts.length < 4) continue;
+    const [name, addrHex, type, sizeStr] = parts;
+    const addr = parseInt(addrHex, 16);
+    const size = parseInt(sizeStr);
+    if (!variables.has(name)) {
+      addVariable(name, { source: 'sym', type, size, addr });
+    } else {
+      const v = variables.get(name);
+      v.addr = addr;
+      v.size = size;
+      if (!v.type || v.type === 'f32') v.type = type;
+      v.source = v.source === 'trace' ? 'trace+sym' : 'sym';
+    }
+    count++;
+  }
+  logTerminal(`SYM: loaded ${count} symbols from device`, 'sym');
+  refreshVarList();
+  document.getElementById('var-count-badge').textContent = variables.size;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  PEEK / SET
+// ─────────────────────────────────────────────────────────────────────────
+function doPeek() {
+  const addr = document.getElementById('peek-addr').value.trim().replace(/^0x/i,'');
+  const len  = parseInt(document.getElementById('peek-len').value) || 4;
+  if (!addr) { logTerminal('ERR:Enter address first', 'err'); return; }
+  sendSerial(`PEEK:${addr}:${len}`);
+}
+
+function parsePeekResult(data) {
+  const colon = data.indexOf(':');
+  if (colon < 0) return;
+  const addrHex = data.slice(0, colon);
+  const hexBytes = data.slice(colon + 1).trim().split(' ').map(b => parseInt(b, 16)).filter(b => !isNaN(b));
+
+  document.getElementById('peek-result').textContent = hexBytes.map(b => b.toString(16).padStart(2,'0').toUpperCase()).join(' ');
+
+  // Interpret
+  const interp = [];
+  if (hexBytes.length >= 4) {
+    const buf = new ArrayBuffer(4);
+    const view = new DataView(buf);
+    hexBytes.slice(0,4).forEach((b,i) => view.setUint8(i, b));
+    interp.push(`float32 (LE): ${view.getFloat32(0, true).toFixed(6)}`);
+    interp.push(`int32   (LE): ${view.getInt32(0, true)}`);
+    interp.push(`uint32  (LE): 0x${view.getUint32(0, true).toString(16).toUpperCase()}`);
+  }
+  if (hexBytes.length >= 2) {
+    const buf = new ArrayBuffer(2);
+    const view = new DataView(buf);
+    hexBytes.slice(0,2).forEach((b,i) => view.setUint8(i, b));
+    interp.push(`int16   (LE): ${view.getInt16(0, true)}`);
+  }
+  if (hexBytes.length >= 1) {
+    interp.push(`uint8: ${hexBytes[0]}`);
+  }
+
+  document.getElementById('peek-interpret').innerHTML = interp.map(s => `<div>${s}</div>`).join('');
+
+  // If an auto-poll variable, update its history
+  if (autoPollVarName && hexBytes.length >= 1) {
+    const pollType = document.getElementById('poll-type').value;
+    const value = interpretBytes(hexBytes, pollType);
+    if (value !== null) {
+      const v = variables.get(autoPollVarName);
+      if (v) {
+        v.value = value;
+        v.history.push({ t: Date.now(), v: value });
+        if (v.history.length > MAX_HISTORY) v.history.shift();
+        refreshVarList();
+        refreshRightPanel();
+      }
+    }
+  }
+}
+
+function interpretBytes(bytes, type) {
+  if (!bytes.length) return null;
+  const buf = new ArrayBuffer(4);
+  const view = new DataView(buf);
+  bytes.slice(0,4).forEach((b,i) => view.setUint8(i, b));
+  if (type === 'f32') return view.getFloat32(0, true);
+  if (type === 'i32') return view.getInt32(0, true);
+  if (type === 'u8')  return bytes[0];
+  if (type === 'u16') return view.getUint16(0, true);
+  return null;
+}
+
+function doSet() {
+  const addr = document.getElementById('set-addr').value.trim().replace(/^0x/i,'');
+  const val  = document.getElementById('set-val').value.trim().replace(/\s/g,'');
+  if (!addr || !val) return;
+  sendSerial(`SET:${addr}:${val}`);
+}
+
+function setValPreset(hex) {
+  document.getElementById('set-val').value = hex;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  AUTO-POLL
+// ─────────────────────────────────────────────────────────────────────────
+function startAutoPoll() {
+  const addr = document.getElementById('poll-addr').value.trim().replace(/^0x/i,'');
+  const type = document.getElementById('poll-type').value;
+  const name = document.getElementById('poll-name').value.trim() || ('peek_' + addr);
+  if (!addr) { logTerminal('ERR:Enter address for polling', 'err'); return; }
+
+  const len = type === 'f32' ? 4 : type === 'i32' ? 4 : type === 'u16' ? 2 : 1;
+
+  if (!variables.has(name)) {
+    addVariable(name, { source: 'peek', type, size: len, addr: parseInt(addr,16) });
+  }
+  const v = variables.get(name);
+  v.plotted = true;
+
+  autoPollVarName = name;
+  autoPollTimer = setInterval(() => {
+    sendSerial(`PEEK:${addr}:${len}`);
+  }, 200);  // 5 Hz polling
+
+  document.getElementById('btn-start-poll').disabled = true;
+  document.getElementById('btn-stop-poll').disabled = false;
+  logTerminal(`OK:Auto-poll started: ${name} @ 0x${addr} (5 Hz)`, 'ok');
+  refreshVarList();
+}
+
+function stopAutoPoll() {
+  clearInterval(autoPollTimer);
+  autoPollTimer = null;
+  autoPollVarName = null;
+  document.getElementById('btn-start-poll').disabled = false;
+  document.getElementById('btn-stop-poll').disabled = true;
+  logTerminal('OK:Auto-poll stopped', 'ok');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  TRACE TOGGLE
+// ─────────────────────────────────────────────────────────────────────────
+function toggleTrace() {
+  if (traceStreaming) {
+    sendSerial('TRACE_STOP');
+    traceStreaming = false;
+  } else {
+    sendSerial('TRACE_START');
+    traceStreaming = true;
+  }
+  updateTraceBtn();
+}
+
+function updateTraceBtn() {
+  const btn = document.getElementById('btn-trace');
+  if (traceStreaming) {
+    btn.textContent = '⏹ STOP TRACE';
+    btn.classList.add('active');
+    document.getElementById('conn-dot').className = 'dot connected streaming';
+  } else {
+    btn.textContent = '⬤ TRACE';
+    btn.classList.remove('active');
+    if (connected) document.getElementById('conn-dot').className = 'dot connected';
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  ELF PARSER (pure JS, no libraries)
+// ─────────────────────────────────────────────────────────────────────────
+function elfDragOver(e) { e.preventDefault(); document.getElementById('elf-zone').classList.add('drag'); }
+function elfDragLeave()  { document.getElementById('elf-zone').classList.remove('drag'); }
+function elfDrop(e) {
+  e.preventDefault();
+  document.getElementById('elf-zone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) handleElfFile(file);
+}
+
+function handleElfFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      parseELF(e.target.result, file.name);
+    } catch(ex) {
+      logTerminal('ERR:ELF parse failed: ' + ex.message, 'err');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function parseELF(buffer, filename) {
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  // Magic: 0x7f 'E' 'L' 'F'
+  if (bytes[0] !== 0x7f || bytes[1] !== 0x45 || bytes[2] !== 0x4c || bytes[3] !== 0x46) {
+    throw new Error('Not a valid ELF file (bad magic bytes)');
+  }
+
+  const elfClass = bytes[4];  // 1=32bit, 2=64bit
+  const endian   = bytes[5];  // 1=LE, 2=BE
+  const le = endian === 1;
+
+  if (elfClass !== 1) {
+    logTerminal('WARN:64-bit ELF detected — ESP32 should be 32-bit. Continuing.', 'warn');
+  }
+
+  const r16 = (off) => le ? view.getUint16(off, true) : view.getUint16(off, false);
+  const r32 = (off) => le ? view.getUint32(off, true) : view.getUint32(off, false);
+
+  const machine = r16(18);  // 0x5e = XTENSA (ESP32), 0xF3 = RISC-V
+  const machineStr = machine === 0x5e ? 'Xtensa (ESP32)' :
+                     machine === 0xF3 ? 'RISC-V (ESP32C3/S3)' :
+                     '0x' + machine.toString(16);
+
+  const shoff    = r32(32);   // section header table offset
+  const shentsize = r16(46);
+  const shnum    = r16(48);
+  const shstrndx = r16(50);   // index of section name string table
+
+  if (shoff === 0 || shnum === 0) {
+    throw new Error('No section headers found in ELF');
+  }
+
+  // Read section headers
+  const sections = [];
+  for (let i = 0; i < shnum; i++) {
+    const base = shoff + i * shentsize;
+    sections.push({
+      nameOff: r32(base + 0),
+      type:    r32(base + 4),
+      flags:   r32(base + 8),
+      addr:    r32(base + 12),
+      offset:  r32(base + 16),
+      size:    r32(base + 20),
+      link:    r32(base + 24),
+      entsize: r32(base + 36),
+    });
+  }
+
+  // Get section name string table
+  const shstrtab = sections[shstrndx];
+  const getName = (nameOff) => {
+    let end = shstrtab.offset + nameOff;
+    while (bytes[end] !== 0 && end < buffer.byteLength) end++;
+    return new TextDecoder().decode(bytes.slice(shstrtab.offset + nameOff, end));
+  };
+
+  // Find .symtab and .strtab
+  let symtab = null, strtab = null;
+  let textBase = 0, dataBase = 0;
+  for (const s of sections) {
+    const name = getName(s.nameOff);
+    if (name === '.symtab') symtab = s;
+    if (name === '.strtab') strtab = s;
+    if (name === '.text' && s.addr) textBase = s.addr;
+    if ((name === '.data' || name === '.bss') && s.addr && !dataBase) dataBase = s.addr;
+  }
+
+  if (!symtab) {
+    // Try .dynsym as fallback
+    for (const s of sections) {
+      if (getName(s.nameOff) === '.dynsym') { symtab = s; break; }
+    }
+    if (!symtab) throw new Error('No .symtab found. Make sure you are using a debug build (.elf not .bin)');
+  }
+  if (!strtab) throw new Error('No .strtab found');
+
+  // Parse symbols — each entry is 16 bytes in 32-bit ELF
+  // Elf32_Sym: st_name(4) st_value(4) st_size(4) st_info(1) st_other(1) st_shndx(2)
+  const SYM_ENTRY = symtab.entsize || 16;
+  const numSyms = symtab.size / SYM_ENTRY;
+  let added = 0;
+
+  // RAM regions for ESP32 (accept any address, let user filter)
+  const isDataAddr = (addr) => addr >= 0x20000000 && addr < 0x60000000;
+
+  for (let i = 0; i < numSyms; i++) {
+    const base = symtab.offset + i * SYM_ENTRY;
+    const nameOff = r32(base + 0);
+    const value   = r32(base + 4);
+    const size    = r32(base + 8);
+    const info    = bytes[base + 12];
+    const bind    = info >> 4;   // 0=local,1=global,2=weak
+    const type_   = info & 0xf;  // 0=notype,1=object,2=func
+
+    if (type_ !== 1) continue;   // only OBJECT type (variables)
+    if (size === 0)  continue;   // skip zero-size
+    if (!isDataAddr(value)) continue;  // skip code/peripheral addresses
+
+    // Get name from strtab
+    let end = strtab.offset + nameOff;
+    while (bytes[end] !== 0 && end < buffer.byteLength) end++;
+    const name = new TextDecoder().decode(bytes.slice(strtab.offset + nameOff, end));
+    if (!name || name.startsWith('_') || name.startsWith('__')) continue; // skip internal
+
+    // Infer type from size
+    const type = size === 4 ? 'f32' : size === 8 ? 'f64' : size === 2 ? 'u16' : size === 1 ? 'u8' : 'u8[]';
+
+    if (!variables.has(name)) {
+      addVariable(name, { source: 'elf', type, size, addr: value });
+    } else {
+      const v = variables.get(name);
+      if (!v.addr) v.addr = value;
+      v.size = size;
+      v.source = v.source.includes('trace') ? 'trace+elf' : 'elf';
+    }
+    added++;
+  }
+
+  // Update ELF info panel
+  document.getElementById('elf-info-section').style.display = 'block';
+  document.getElementById('elf-filename').textContent = filename;
+  document.getElementById('elf-arch').textContent = machineStr;
+  document.getElementById('elf-sym-count').textContent = added + ' data symbols';
+  document.getElementById('elf-text-base').textContent = '0x' + textBase.toString(16).toUpperCase();
+  document.getElementById('elf-data-base').textContent = '0x' + dataBase.toString(16).toUpperCase();
+
+  const zone = document.getElementById('elf-zone');
+  zone.classList.add('loaded');
+  document.getElementById('elf-status-text').innerHTML = `✓ <strong>${filename}</strong><br>${added} symbols loaded`;
+  document.getElementById('elf-stats').textContent = `${machineStr} · ${added} objects · ${numSyms} total syms`;
+
+  logTerminal(`ELF: ${filename} → ${added} data symbols (${machineStr})`, 'sym');
+  document.getElementById('var-count-badge').textContent = variables.size;
+  refreshVarList();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  VARIABLE MANAGEMENT
+// ─────────────────────────────────────────────────────────────────────────
+function addVariable(name, meta) {
+  const color = PLOT_COLORS[colorIdx % PLOT_COLORS.length];
+  colorIdx++;
+  // Auto-plot variables that arrive from TRACE stream; ELF/SYM symbols
+  // are listed but not plotted until user clicks the toggle (too many to show at once)
+  const autoPlot = (meta.source === 'trace');
+  variables.set(name, {
+    name,
+    value: null,
+    addr: meta.addr || null,
+    type: meta.type || 'f32',
+    size: meta.size || 4,
+    source: meta.source || 'trace',
+    color,
+    plotted: autoPlot,
+    history: [],
+    lastUpdate: null,
+    stats: { min: Infinity, max: -Infinity, sum: 0, sumSq: 0, n: 0 }
+  });
+  document.getElementById('var-count-badge').textContent = variables.size;
+}
+
+function setVarTab(tab) {
+  varTab = tab;
+  document.querySelectorAll('.source-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.tab === tab);
+  });
+  refreshVarList();
+}
+
+function refreshVarList() {
+  const list = document.getElementById('var-list');
+  const items = [...variables.values()].filter(v => {
+    if (varTab === 'all')   return true;
+    if (varTab === 'trace') return v.source.includes('trace');
+    if (varTab === 'elf')   return v.source.includes('elf');
+    if (varTab === 'sym')   return v.source.includes('sym');
+    return true;
+  });
+
+  if (items.length === 0) {
+    list.innerHTML = `<div class="empty-state"><div class="es-icon">📡</div>No variables yet</div>`;
+    return;
+  }
+
+  let html = '';
+  for (const v of items) {
+    const valStr = v.value !== null ? formatVal(v.value) : '—';
+    const addrStr = v.addr ? '0x' + v.addr.toString(16).toUpperCase().padStart(8,'0') : '';
+    const srcCls = v.source.includes('elf') ? 'src-elf' : v.source.includes('sym') ? 'src-sym' : v.source === 'peek' ? 'src-peek' : 'src-trace';
+    const isSelected = selectedVar === v.name;
+    const isPlotted  = v.plotted;
+
+    html += `<div class="var-item ${isSelected?'active':''} ${isPlotted?'plotted':''}" onclick="selectVar('${v.name}')">
+      <div class="var-color-dot" style="background:${v.color};${isPlotted?'box-shadow:0 0 6px '+v.color:''}"></div>
+      <div>
+        <div class="var-name">${v.name}</div>
+        <div class="var-addr">${addrStr}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+        <div class="var-value">${valStr}</div>
+        <span class="src-badge ${srcCls}">${v.source}</span>
+      </div>
+    </div>`;
+  }
+  list.innerHTML = html;
+}
+
+function formatVal(v) {
+  if (v === null || v === undefined) return '—';
+  if (Math.abs(v) >= 10000 || (Math.abs(v) < 0.001 && v !== 0)) return v.toExponential(2);
+  if (Number.isInteger(v)) return v.toString();
+  return v.toFixed(3);
+}
+
+function selectVar(name) {
+  selectedVar = name;
+  refreshVarList();
+  showVarDetail(name);
+}
+
+function showVarDetail(name) {
+  const v = variables.get(name);
+  if (!v) return;
+  document.getElementById('no-selection').style.display = 'none';
+  document.getElementById('var-detail').style.display = 'block';
+
+  document.getElementById('dv-name').textContent = v.name;
+  document.getElementById('dv-value').textContent = v.value !== null ? formatVal(v.value) : '—';
+  document.getElementById('dv-addr').textContent = v.addr ? '0x' + v.addr.toString(16).toUpperCase().padStart(8,'0') : 'unknown';
+  document.getElementById('dv-type').textContent = v.type;
+  document.getElementById('dv-size').textContent = v.size + ' bytes';
+  document.getElementById('dv-source').innerHTML = `<span class="src-badge src-${v.source.split('+')[0]}">${v.source}</span>`;
+  document.getElementById('chk-plot').checked = v.plotted;
+
+  // Populate PEEK fields with this variable's address
+  if (v.addr) {
+    const addrHex = v.addr.toString(16).toUpperCase().padStart(8,'0');
+    document.getElementById('peek-addr').value = addrHex;
+    document.getElementById('peek-len').value  = v.size;
+    document.getElementById('set-addr').value  = addrHex;
+  }
+
+  // Update stats
+  if (v.history.length > 1) {
+    const vals = v.history.map(p => p.v);
+    const mn = Math.min(...vals), mx = Math.max(...vals);
+    const avg = vals.reduce((a,b) => a+b, 0) / vals.length;
+    const std = Math.sqrt(vals.reduce((a,b) => a + (b-avg)**2, 0) / vals.length);
+    document.getElementById('dv-min').textContent = formatVal(mn);
+    document.getElementById('dv-max').textContent = formatVal(mx);
+    document.getElementById('dv-avg').textContent = formatVal(avg);
+    document.getElementById('dv-std').textContent = formatVal(std);
+  }
+
+  drawSparkline(v);
+}
+
+function toggleVarPlot() {
+  if (!selectedVar) return;
+  const v = variables.get(selectedVar);
+  if (!v) return;
+  v.plotted = document.getElementById('chk-plot').checked;
+  refreshVarList();
+  updateScopeLegend();
+}
+
+function refreshRightPanel() {
+  if (selectedVar && variables.has(selectedVar)) showVarDetail(selectedVar);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SPARKLINE (mini chart on right panel)
+// ─────────────────────────────────────────────────────────────────────────
+function drawSparkline(v) {
+  const canvas = document.getElementById('spark-canvas');
+  const w = canvas.offsetWidth, h = canvas.offsetHeight;
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  const pts = v.history.slice(-200);
+  if (pts.length < 2) return;
+
+  const vals = pts.map(p => p.v);
+  const mn = Math.min(...vals), mx = Math.max(...vals);
+  const range = mx - mn || 1;
+
+  ctx.beginPath();
+  ctx.strokeStyle = v.color;
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = v.color;
+  ctx.shadowBlur = 4;
+
+  pts.forEach((p, i) => {
+    const x = (i / (pts.length - 1)) * w;
+    const y = h - ((p.v - mn) / range) * (h - 4) - 2;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  OSCILLOSCOPE
+// ─────────────────────────────────────────────────────────────────────────
+const scopeCanvas = document.getElementById('scope-canvas');
+const scopeCtx    = scopeCanvas.getContext('2d');
+let   animId      = null;
+
+function resizeCanvas() {
+  const wrap = document.getElementById('scope-canvas-wrap');
+  scopeCanvas.width  = wrap.offsetWidth;
+  scopeCanvas.height = wrap.offsetHeight;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+function drawScope() {
+  animId = requestAnimationFrame(drawScope);
+  if (scopePaused) return;
+
+  const W = scopeCanvas.width, H = scopeCanvas.height;
+  const ctx = scopeCtx;
+
+  // Background
+  ctx.fillStyle = '#070a0d';
+  ctx.fillRect(0, 0, W, H);
+
+  const plotted = [...variables.values()].filter(v => v.plotted && v.history.length > 1);
+
+  // Update placeholder
+  document.getElementById('scope-placeholder').style.display = plotted.length === 0 ? 'flex' : 'none';
+
+  if (plotted.length === 0) return;
+
+  // Grid
+  drawScopeGrid(ctx, W, H);
+
+  // Compute time window
+  const now = Date.now();
+  const windowMs = scopeWindows[scopeWindowIdx] * 1000;
+  const tStart   = now - windowMs;
+
+  // Find global Y range across all plotted variables
+  let globalMin = Infinity, globalMax = -Infinity;
+  for (const v of plotted) {
+    const pts = v.history.filter(p => p.t >= tStart);
+    if (!pts.length) continue;
+    const mn = Math.min(...pts.map(p => p.v));
+    const mx = Math.max(...pts.map(p => p.v));
+    if (mn < globalMin) globalMin = mn;
+    if (mx > globalMax) globalMax = mx;
+  }
+  if (!isFinite(globalMin)) return;
+  const range = globalMax - globalMin || 1;
+  const pad = range * 0.1;
+
+  const yToCanvas = (y) => H - ((y - globalMin + pad) / (range + pad * 2)) * H;
+  const tToCanvas = (t) => ((t - tStart) / windowMs) * W;
+
+  // Y axis labels
+  ctx.fillStyle = '#3a5a72';
+  ctx.font = '10px "Share Tech Mono"';
+  ctx.textAlign = 'left';
+  for (let i = 0; i <= 4; i++) {
+    const val = globalMin + (range / 4) * i;
+    const y   = yToCanvas(val);
+    ctx.fillText(formatVal(val), 4, y - 2);
+  }
+
+  // Draw each variable
+  for (const v of plotted) {
+    const pts = v.history.filter(p => p.t >= tStart);
+    if (pts.length < 2) continue;
+
+    ctx.beginPath();
+    ctx.strokeStyle = v.color;
+    ctx.lineWidth = 1.5;
+    ctx.shadowColor = v.color;
+    ctx.shadowBlur = 6;
+
+    let first = true;
+    for (const p of pts) {
+      const x = tToCanvas(p.t);
+      const y = yToCanvas(p.v);
+      first ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      first = false;
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Last value label at right edge
+    const last = pts[pts.length - 1];
+    const lx = tToCanvas(last.t);
+    const ly = yToCanvas(last.v);
+    ctx.fillStyle = v.color;
+    ctx.font = 'bold 11px "Share Tech Mono"';
+    ctx.textAlign = 'right';
+    ctx.fillText(formatVal(last.v), Math.min(lx, W - 4), ly - 4);
+  }
+
+  updateScopeLegend();
+}
+
+function drawScopeGrid(ctx, W, H) {
+  ctx.strokeStyle = '#1a2a35';
+  ctx.lineWidth = 1;
+  const cols = 10, rows = 8;
+  for (let i = 0; i <= cols; i++) {
+    const x = (i / cols) * W;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let i = 0; i <= rows; i++) {
+    const y = (i / rows) * H;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // Center line
+  ctx.strokeStyle = '#243545';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function updateScopeLegend() {
+  const plotted = [...variables.values()].filter(v => v.plotted);
+  const legend  = document.getElementById('scope-legend');
+  legend.innerHTML = plotted.map(v =>
+    `<div class="legend-item">
+      <div class="legend-color" style="background:${v.color}"></div>
+      <span style="color:${v.color};font-family:var(--mono);font-size:10px">${v.name}</span>
+    </div>`
+  ).join('');
+}
+
+function changeScopeWindow(dir) {
+  scopeWindowIdx = Math.max(0, Math.min(scopeWindows.length - 1, scopeWindowIdx + dir));
+  document.getElementById('scope-time-stat').textContent = `window: ${scopeWindows[scopeWindowIdx]}s`;
+}
+
+function togglePause() {
+  scopePaused = !scopePaused;
+  document.getElementById('btn-pause').textContent = scopePaused ? '▶ RESUME' : '⏸ PAUSE';
+}
+
+function clearAllPlots() {
+  for (const v of variables.values()) {
+    v.plotted = false;
+    v.history = [];
+  }
+  updateScopeLegend();
+  refreshVarList();
+}
+
+// Start animation loop
+drawScope();
+
+// ─────────────────────────────────────────────────────────────────────────
+//  CSV EXPORT
+// ─────────────────────────────────────────────────────────────────────────
+function exportCSV() {
+  const plotted = [...variables.values()].filter(v => v.plotted && v.history.length > 0);
+  if (!plotted.length) { logTerminal('WARN:No plotted variables to export', 'warn'); return; }
+
+  // Merge all timestamps
+  const allTs = [...new Set(plotted.flatMap(v => v.history.map(p => p.t)))].sort((a,b) => a-b);
+
+  // For each var, make a lookup map
+  const maps = plotted.map(v => {
+    const m = new Map();
+    v.history.forEach(p => m.set(p.t, p.v));
+    return m;
+  });
+
+  let csv = 'timestamp_ms,' + plotted.map(v => v.name).join(',') + '\n';
+  for (const t of allTs) {
+    csv += t + ',' + maps.map(m => m.has(t) ? m.get(t) : '').join(',') + '\n';
+  }
+
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url; a.download = 'esp32_trace_' + Date.now() + '.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+  logTerminal('OK:CSV exported (' + allTs.length + ' rows)', 'ok');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  TERMINAL
+// ─────────────────────────────────────────────────────────────────────────
+const MAX_LOG_LINES = 500;
+let logLines = 0;
+
+function logTerminal(text, cls = 'info') {
+  const out  = document.getElementById('terminal-output');
+  const line = document.createElement('div');
+  const ts   = new Date().toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  line.innerHTML = `<span class="log-ts">${ts}</span><span class="log-${cls}">${escapeHtml(text)}</span>`;
+  out.appendChild(line);
+  logLines++;
+  if (logLines > MAX_LOG_LINES) {
+    out.removeChild(out.firstChild);
+    logLines--;
+  }
+  if (document.getElementById('chk-autoscroll').checked) {
+    out.scrollTop = out.scrollHeight;
+  }
+}
+
+function clearTerminal() {
+  document.getElementById('terminal-output').innerHTML = '';
+  logLines = 0;
+}
+
+function escapeHtml(t) {
+  return t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  SERVO CONTROL
+// ─────────────────────────────────────────────────────────────────────────
+function servoCmd(cmd) {
+  sendSerial(cmd);
+}
+
+function servoPreset(angle) {
+  document.getElementById('servo-slider').value = angle;
+  document.getElementById('servo-angle-display').textContent = angle + '°';
+  sendSerial('SERVO_POS:' + angle);
+  updatePwmBar(angleToUs(angle));
+}
+
+function servoSliderMove(val) {
+  // Update display while dragging but don't spam serial
+  document.getElementById('servo-angle-display').textContent = val + '°';
+  updatePwmBar(angleToUs(parseInt(val)));
+}
+
+function servoSliderSet(val) {
+  // Send command when slider is released
+  const angle = parseInt(val);
+  document.getElementById('servo-angle-display').textContent = angle + '°';
+  sendSerial('SERVO_POS:' + angle);
+  updatePwmBar(angleToUs(angle));
+}
+
+function servoSweepStart() {
+  const from = document.getElementById('sweep-from').value || 20;
+  const to   = document.getElementById('sweep-to').value   || 160;
+  const step = document.getElementById('sweep-step').value  || 25;
+  sendSerial(`SERVO_SWEEP:${from}:${to}:${step}`);
+}
+
+// Standard servo formula: 0°=500µs, 180°=2500µs
+function angleToUs(angle) {
+  return 500 + (angle / 180) * 2000;
+}
+
+function updatePwmBar(pulseUs) {
+  // Map 500–2500µs to 0–100% of bar width
+  const pct = ((pulseUs - 500) / 2000) * 100;
+  const bar  = document.getElementById('pwm-bar');
+  const lbl  = document.getElementById('pwm-label');
+  const duty = document.getElementById('pwm-duty');
+  if (!bar) return;
+  bar.style.width = Math.max(2, pct) + '%';
+  lbl.textContent = Math.round(pulseUs) + 'µs';
+  // Duty cycle: pulseUs / 20000µs (50Hz period)
+  const dutyPct = (pulseUs / 20000 * 100).toFixed(1);
+  duty.textContent = `duty: ${dutyPct}%`;
+}
+
+// Wrap core trace parser to also update PWM bar and servo slider live
+function parseTraceLine(data) {
+  _parseTraceLineCore(data);
+  // After parsing, check if g_servoPulseUs has updated and refresh PWM bar
+  const sv = variables.get('g_servoPulseUs');
+  if (sv && sv.value !== null && sv.value > 0) {
+    updatePwmBar(sv.value);
+    // Sync slider to g_servoAngle if it exists
+    const sa = variables.get('g_servoAngle');
+    if (sa && sa.value !== null && sa.value >= 0) {
+      const slider = document.getElementById('servo-slider');
+      if (slider && !slider.matches(':active')) {
+        slider.value = sa.value;
+        document.getElementById('servo-angle-display').textContent = Math.round(sa.value) + '°';
+      }
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  INIT
+// ─────────────────────────────────────────────────────────────────────────
+updatePwmBar(1500);  // show centred PWM bar on load
+
+logTerminal('ESP32 Variable Tracer v1.2 ready', 'ok');
+logTerminal('1. Flash esp32-var-tracer.ino → connect → click TRACE', 'info');
+logTerminal('2. Variables auto-plot on the oscilloscope when they arrive', 'info');
+logTerminal('3. Click any variable in the left panel to inspect / toggle plot', 'info');
+logTerminal('4. Upload .elf for full symbol table with RAM addresses', 'info');
+logTerminal('5. Use SERVO panel (right) to control servo on D2 and watch PWM', 'info');
+logTerminal('Fix: waveforms now run at 0.5 Hz (2s cycle) — not blur-speed', 'ok');
+logTerminal('Fix: real IMU data used when LSM6DS3 found (no more fake sine for accel)', 'ok');
+</script>
+</body>
+</html>
