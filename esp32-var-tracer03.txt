@@ -1,0 +1,471 @@
+// ============================================================
+//  esp32-var-tracer.ino  v1.3
+//  ESP32 Serial Variable & Trace Viewer + Servo Tester
+//  Companion sketch for tracer.html
+//  Target: Seeed XIAO ESP32S3 (or any ESP32)
+//
+//  Serial commands (all newline-terminated):
+//    PING                              -> OK:PONG
+//    STATUS                            -> OK:STATUS:heap=N,cpu=N,...
+//    TRACE_START                       -> stream TRACE lines at 20 Hz
+//    TRACE_STOP                        -> stop TRACE stream
+//    PEEK:<hexAddr>:<numBytes>         -> PEEK_RESULT:<hexAddr>:XX XX ...
+//    SET:<hexAddr>:<hexBytes>          -> write bytes to RAM address
+//    SYMBOLS                           -> dump variable addresses
+//    SERVO_ATTACH                      -> attach servo on D2
+//    SERVO_DETACH                      -> detach servo
+//    SERVO_POS:<0-180>                 -> move to angle
+//    SERVO_SWEEP:<from>:<to>:<stepMs>  -> continuous bounce sweep
+//    SERVO_STOP                        -> stop sweep
+//
+//  TRACE line (20 Hz):
+//    TRACE:g_accelX=N,g_accelY=N,...\n
+//
+//  Even with NO servo connected, g_servoAngle and g_servoPulseUs
+//  simulate a slow sweep so the oscilloscope always has something
+//  to show in the servo channels.
+//
+//  Libraries required (Arduino Library Manager):
+//    ESP32Servo  by Kevin Harrington  (search "ESP32Servo")
+//    LSM6DS3     by Seeed Studio      (comment out if no IMU)
+//
+//  Board: XIAO_ESP32S3  (or any ESP32)   Baud: 115200
+// ============================================================
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <ESP32Servo.h>
+
+// ── IMU — comment these two lines out if you have no LSM6DS3 ──
+#include "LSM6DS3.h"
+LSM6DS3 imu(I2C_MODE, 0x6A);
+bool imuOk = false;
+
+// ─────────────────────────────────────────────────────
+//  Servo config
+// ─────────────────────────────────────────────────────
+#define SERVO_PIN  D2
+Servo myServo;
+bool  servoAttached = false;
+
+// ─────────────────────────────────────────────────────
+//  Traced global variables
+//  volatile → kept in RAM → visible in .elf symbol table
+//  → directly readable via PEEK from the webpage
+// ─────────────────────────────────────────────────────
+
+// IMU channels (real hardware when IMU found, demo waveform otherwise)
+volatile float   g_accelX       = 0.0f;
+volatile float   g_accelY       = 0.0f;
+volatile float   g_accelZ       = 9.81f;
+volatile float   g_gyroX        = 0.0f;
+volatile float   g_gyroY        = 0.0f;
+volatile float   g_gyroZ        = 0.0f;
+volatile float   g_temperature  = 25.0f;
+
+// Demo waveforms — always active, always interesting on the scope
+volatile float   g_sineWave     = 0.0f;
+volatile float   g_squareWave   = 0.0f;
+volatile float   g_sawtoothWave = 0.0f;
+
+// System
+volatile int32_t g_counter      = 0;
+volatile float   g_heapFree     = 0.0f;
+volatile uint8_t g_ledState     = 0;
+
+// Servo state — simulated even when no servo connected so the
+// oscilloscope always has something meaningful to show
+volatile int32_t g_servoAngle   = 90;   // degrees 0–180
+volatile float   g_servoPulseUs = 1500.0f; // microseconds 500–2500
+volatile uint8_t g_servoAttached= 0;
+
+// ─────────────────────────────────────────────────────
+//  Timing constants
+// ─────────────────────────────────────────────────────
+const uint16_t TRACE_INTERVAL_MS  = 50;  // 20 Hz TRACE output
+const uint16_t SENSOR_INTERVAL_MS = 20;  // 50 Hz IMU read
+const uint16_t WAVE_INTERVAL_MS   = 20;  // 50 Hz waveform + sim update
+
+// Waveform speed: 0.5 Hz = 2-second cycle, easy to watch on scope
+const float WAVE_FREQ_HZ = 0.5f;
+const float WAVE_STEP    = TWO_PI * WAVE_FREQ_HZ * (WAVE_INTERVAL_MS / 1000.0f);
+
+// Simulated servo triangle wave: 4-second full sweep 0→180→0
+// One tick every WAVE_INTERVAL_MS = 20 ms
+// 4000 ms / 20 ms = 200 ticks per full cycle
+// Each tick moves 180/100 = 1.8 degrees (100 ticks per half)
+const float SIM_SERVO_STEP = 1.8f;
+
+// ─────────────────────────────────────────────────────
+//  Internal state
+// ─────────────────────────────────────────────────────
+bool  traceStreaming = false;
+float phaseAngle    = 0.0f;
+
+unsigned long lastTraceMs  = 0;
+unsigned long lastSensorMs = 0;
+unsigned long lastWaveMs   = 0;
+
+// Real servo sweep state (when SERVO_SWEEP command is used)
+bool     sweepActive  = false;
+int      sweepFrom    = 20;
+int      sweepTo      = 160;
+int      sweepPos     = 20;
+int      sweepDir     = 1;
+uint16_t sweepStepMs  = 25;
+unsigned long lastSweepMs = 0;
+
+// Simulated servo (runs when no real servo is attached or no sweep active)
+float simServoPos = 90.0f;
+float simServoDir = SIM_SERVO_STEP;
+
+// ─────────────────────────────────────────────────────
+//  Helpers
+// ─────────────────────────────────────────────────────
+
+// BUG FIX v1.3: was (angle / 180) which is integer division → always 0
+// for angle < 180. Must use 180.0f for float division.
+float angleToUs(float angle) {
+  return 500.0f + (angle / 180.0f) * 2000.0f;
+}
+
+// ─────────────────────────────────────────────────────
+//  setup()
+// ─────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(115200);
+  delay(1200);
+
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);  // XIAO: HIGH = LED off
+
+  Wire.begin();
+  imuOk = (imu.begin() == 0);
+  Serial.println(imuOk
+    ? "OK:IMU LSM6DS3 ready"
+    : "WARN:IMU not found — demo waveforms used for IMU channels");
+
+  Serial.println("OK:ESP32 Variable Tracer v1.3");
+  printSymbolHints();
+}
+
+// ─────────────────────────────────────────────────────
+//  loop()
+// ─────────────────────────────────────────────────────
+void loop() {
+  unsigned long now = millis();
+
+  // ── Serial commands ──────────────────────────────
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) handleCommand(cmd);
+  }
+
+  // ── Real IMU at 50 Hz ────────────────────────────
+  if (imuOk && (now - lastSensorMs >= SENSOR_INTERVAL_MS)) {
+    lastSensorMs = now;
+    g_accelX     = imu.readFloatAccelX();
+    g_accelY     = imu.readFloatAccelY();
+    g_accelZ     = imu.readFloatAccelZ();
+    g_gyroX      = imu.readFloatGyroX();
+    g_gyroY      = imu.readFloatGyroY();
+    g_gyroZ      = imu.readFloatGyroZ();
+    g_temperature= imu.readTempC();
+  }
+
+  // ── Waveforms + simulated servo (every 20 ms) ────
+  if (now - lastWaveMs >= WAVE_INTERVAL_MS) {
+    lastWaveMs = now;
+
+    // Phase advance
+    phaseAngle += WAVE_STEP;
+    if (phaseAngle > TWO_PI) phaseAngle -= TWO_PI;
+
+    // Demo waveforms
+    g_sineWave     = sinf(phaseAngle) * 100.0f;
+    g_squareWave   = (sinf(phaseAngle) >= 0.0f) ? 100.0f : -100.0f;
+    g_sawtoothWave = (phaseAngle / TWO_PI) * 200.0f - 100.0f;
+
+    // Demo IMU when no hardware present
+    if (!imuOk) {
+      g_accelX    = sinf(phaseAngle) * 1.5f;
+      g_accelY    = cosf(phaseAngle) * 1.5f;
+      g_accelZ    = 9.81f + sinf(phaseAngle * 2.0f) * 0.1f;
+      g_gyroX     = sinf(phaseAngle * 1.5f) * 30.0f;
+      g_gyroY     = cosf(phaseAngle * 0.8f) * 20.0f;
+      g_gyroZ     = sinf(phaseAngle * 3.0f) * 10.0f;
+      g_temperature = 25.0f + sinf(phaseAngle * 0.2f) * 1.0f;
+    }
+
+    // Simulated servo triangle wave — runs whenever the real servo
+    // is NOT doing an active commanded sweep. This means:
+    //   • No servo connected at all → simulation always runs
+    //   • Servo attached but idle   → simulation runs
+    //   • SERVO_POS or SERVO_SWEEP active → real values used instead
+    if (!sweepActive) {
+      simServoPos += simServoDir;
+      if (simServoPos >= 180.0f) { simServoPos = 180.0f; simServoDir = -SIM_SERVO_STEP; }
+      if (simServoPos <=   0.0f) { simServoPos =   0.0f; simServoDir =  SIM_SERVO_STEP; }
+      g_servoAngle   = (int32_t)simServoPos;
+      g_servoPulseUs = angleToUs(simServoPos);
+      // If servo is physically attached, actually move it with the simulation
+      if (servoAttached) myServo.write((int)simServoPos);
+    }
+
+    g_counter++;
+    g_heapFree = (float)ESP.getFreeHeap();
+
+    // LED blinks ~1 Hz (50 ticks × 20 ms = 1 s)
+    if ((g_counter % 50) == 0) {
+      g_ledState ^= 1;
+      digitalWrite(LED_BUILTIN, g_ledState ? LOW : HIGH);
+    }
+  }
+
+  // ── Real servo sweep (SERVO_SWEEP command) ───────
+  if (sweepActive && servoAttached && (now - lastSweepMs >= sweepStepMs)) {
+    lastSweepMs = now;
+    sweepPos += sweepDir;
+    if (sweepPos >= sweepTo)   { sweepPos = sweepTo;   sweepDir = -1; }
+    if (sweepPos <= sweepFrom) { sweepPos = sweepFrom; sweepDir =  1; }
+    myServo.write(sweepPos);
+    g_servoAngle   = sweepPos;
+    g_servoPulseUs = angleToUs((float)sweepPos);
+  }
+
+  // ── TRACE output ─────────────────────────────────
+  if (traceStreaming && (now - lastTraceMs >= TRACE_INTERVAL_MS)) {
+    lastTraceMs = now;
+    sendTraceLine();
+  }
+}
+
+// ─────────────────────────────────────────────────────
+//  TRACE line — all variables in one serial line
+// ─────────────────────────────────────────────────────
+void sendTraceLine() {
+  Serial.print("TRACE:");
+  Serial.print("g_accelX=");      Serial.print(g_accelX, 3);       Serial.print(",");
+  Serial.print("g_accelY=");      Serial.print(g_accelY, 3);       Serial.print(",");
+  Serial.print("g_accelZ=");      Serial.print(g_accelZ, 3);       Serial.print(",");
+  Serial.print("g_gyroX=");       Serial.print(g_gyroX, 2);        Serial.print(",");
+  Serial.print("g_gyroY=");       Serial.print(g_gyroY, 2);        Serial.print(",");
+  Serial.print("g_gyroZ=");       Serial.print(g_gyroZ, 2);        Serial.print(",");
+  Serial.print("g_temperature="); Serial.print(g_temperature, 2);  Serial.print(",");
+  Serial.print("g_sineWave=");    Serial.print(g_sineWave, 2);     Serial.print(",");
+  Serial.print("g_squareWave=");  Serial.print(g_squareWave, 2);   Serial.print(",");
+  Serial.print("g_sawtoothWave=");Serial.print(g_sawtoothWave, 2); Serial.print(",");
+  Serial.print("g_heapFree=");    Serial.print(g_heapFree, 0);     Serial.print(",");
+  Serial.print("g_ledState=");    Serial.print((int)g_ledState);   Serial.print(",");
+  Serial.print("g_servoAngle=");  Serial.print((int)g_servoAngle); Serial.print(",");
+  Serial.print("g_servoPulseUs=");Serial.println(g_servoPulseUs, 1);
+}
+
+// ─────────────────────────────────────────────────────
+//  Command handler
+// ─────────────────────────────────────────────────────
+void handleCommand(const String& cmd) {
+
+  if (cmd == "PING") {
+    Serial.println("OK:PONG");
+
+  } else if (cmd == "STATUS") {
+    Serial.print("OK:STATUS:heap="); Serial.print(ESP.getFreeHeap());
+    Serial.print(",cpu=");    Serial.print(getCpuFrequencyMhz());
+    Serial.print(",uptime="); Serial.print(millis());
+    Serial.print(",trace=");  Serial.print(traceStreaming ? 1 : 0);
+    Serial.print(",imu=");    Serial.print(imuOk ? 1 : 0);
+    Serial.print(",servo=");  Serial.println(servoAttached ? 1 : 0);
+
+  } else if (cmd == "TRACE_START") {
+    traceStreaming = true;
+    lastTraceMs = 0;
+    Serial.println("OK:TRACE started 20Hz");
+
+  } else if (cmd == "TRACE_STOP") {
+    traceStreaming = false;
+    Serial.println("OK:TRACE stopped");
+
+  } else if (cmd.startsWith("PEEK:")) {
+    int sep = cmd.indexOf(':', 5);
+    if (sep < 0) { Serial.println("ERR:PEEK:<hexAddr>:<numBytes>"); return; }
+    String addrStr = cmd.substring(5, sep);
+    uint8_t nb = (uint8_t)constrain(cmd.substring(sep + 1).toInt(), 1, 64);
+    uint32_t addr = (uint32_t)strtoul(addrStr.c_str(), nullptr, 16);
+    if (addr < 0x20000000 || addr > 0x60000000) {
+      Serial.print("ERR:PEEK addr out of range: 0x"); Serial.println(addrStr); return;
+    }
+    Serial.print("PEEK_RESULT:"); Serial.print(addrStr); Serial.print(":");
+    uint8_t* p = (uint8_t*)addr;
+    for (uint8_t i = 0; i < nb; i++) {
+      char h[4]; snprintf(h, sizeof(h), "%02X", p[i]); Serial.print(h);
+      if (i < nb - 1) Serial.print(" ");
+    }
+    Serial.println();
+
+  } else if (cmd.startsWith("SET:")) {
+    int sep = cmd.indexOf(':', 4);
+    if (sep < 0) { Serial.println("ERR:SET:<hexAddr>:<hexBytes>"); return; }
+    uint32_t addr = (uint32_t)strtoul(cmd.substring(4, sep).c_str(), nullptr, 16);
+    if (addr < 0x20000000 || addr > 0x60000000) {
+      Serial.println("ERR:SET addr out of range"); return;
+    }
+    String v = cmd.substring(sep + 1);
+    uint8_t* p = (uint8_t*)addr;
+    for (int i = 0; i + 1 < (int)v.length(); i += 2) {
+      char b[3] = {v[i], v[i+1], 0};
+      p[i/2] = (uint8_t)strtoul(b, nullptr, 16);
+    }
+    Serial.print("OK:SET 0x"); Serial.print(cmd.substring(4, sep));
+    Serial.print("="); Serial.println(v);
+
+  } else if (cmd == "SYMBOLS") {
+    printSymbolHints();
+
+  // ── SERVO commands ──────────────────────────────────────────────────
+
+  } else if (cmd == "SERVO_ATTACH") {
+    if (!servoAttached) {
+      myServo.attach(SERVO_PIN);
+      servoAttached    = true;
+      g_servoAttached  = 1;
+    }
+    Serial.println("OK:SERVO attached D2");
+
+  } else if (cmd == "SERVO_DETACH") {
+    sweepActive = false;
+    if (servoAttached) {
+      myServo.detach();
+      servoAttached   = false;
+      g_servoAttached = 0;
+    }
+    // NOTE: g_servoAngle and g_servoPulseUs keep updating via simulation
+    Serial.println("OK:SERVO detached — simulation continues");
+
+  } else if (cmd.startsWith("SERVO_POS:")) {
+    int angle = constrain(cmd.substring(10).toInt(), 0, 180);
+    if (!servoAttached) {
+      myServo.attach(SERVO_PIN);
+      servoAttached   = true;
+      g_servoAttached = 1;
+    }
+    sweepActive    = false;          // cancel any running sweep
+    simServoPos    = (float)angle;   // sync simulation position too
+    myServo.write(angle);
+    g_servoAngle   = angle;
+    g_servoPulseUs = angleToUs((float)angle);
+    Serial.print("OK:SERVO:"); Serial.println(angle);
+
+  } else if (cmd.startsWith("SERVO_SWEEP:")) {
+    // Format: SERVO_SWEEP:<from>:<to>:<stepMs>
+    // e.g.   SERVO_SWEEP:20:160:25
+    //
+    // BUG FIX v1.3: previous version used indexOf(':', 12) which found
+    // the colon in "SWEEP:" itself (position 12) instead of the first
+    // delimiter between <from> and <to>.
+    // "SERVO_SWEEP:" is exactly 12 characters (indices 0-11), so the
+    // <from> field starts at index 12. We must search for ':' from 13.
+    int s1 = cmd.indexOf(':', 13);   // colon after <from>
+    int s2 = (s1 > 0) ? cmd.indexOf(':', s1 + 1) : -1;  // colon after <to>
+
+    sweepFrom = constrain(
+      cmd.substring(12, s1 > 0 ? s1 : cmd.length()).toInt(), 0, 180);
+    sweepTo = (s1 > 0)
+      ? constrain(cmd.substring(s1 + 1, s2 > 0 ? s2 : cmd.length()).toInt(), 0, 180)
+      : 160;
+    sweepStepMs = (uint16_t)((s2 > 0)
+      ? constrain(cmd.substring(s2 + 1).toInt(), 5, 500)
+      : 25);
+
+    // Clamp so from < to
+    if (sweepFrom >= sweepTo) sweepTo = sweepFrom + 10;
+    sweepPos    = sweepFrom;
+    sweepDir    = 1;
+    sweepActive = true;
+    lastSweepMs = 0;
+
+    if (!servoAttached) {
+      myServo.attach(SERVO_PIN);
+      servoAttached   = true;
+      g_servoAttached = 1;
+    }
+    Serial.print("OK:SERVO sweep ");
+    Serial.print(sweepFrom); Serial.print("->"); Serial.print(sweepTo);
+    Serial.print(" step:"); Serial.print(sweepStepMs); Serial.println("ms");
+
+  } else if (cmd == "SERVO_STOP") {
+    sweepActive = false;
+    // Simulation takes over again seamlessly
+    Serial.println("OK:SERVO sweep stopped — simulation resumed");
+
+  } else {
+    Serial.print("ERR:Unknown: "); Serial.println(cmd);
+  }
+}
+
+// ─────────────────────────────────────────────────────
+//  Symbol table — printed on boot and on SYMBOLS command
+// ─────────────────────────────────────────────────────
+void printSymbolHints() {
+  Serial.println("SYMBOLS_START");
+  printSym("g_accelX",       &g_accelX,        "f", 4);
+  printSym("g_accelY",       &g_accelY,        "f", 4);
+  printSym("g_accelZ",       &g_accelZ,        "f", 4);
+  printSym("g_gyroX",        &g_gyroX,         "f", 4);
+  printSym("g_gyroY",        &g_gyroY,         "f", 4);
+  printSym("g_gyroZ",        &g_gyroZ,         "f", 4);
+  printSym("g_temperature",  &g_temperature,   "f", 4);
+  printSym("g_sineWave",     &g_sineWave,      "f", 4);
+  printSym("g_squareWave",   &g_squareWave,    "f", 4);
+  printSym("g_sawtoothWave", &g_sawtoothWave,  "f", 4);
+  printSym("g_heapFree",     &g_heapFree,      "f", 4);
+  printSym("g_counter",      &g_counter,       "i", 4);
+  printSym("g_servoAngle",   &g_servoAngle,    "i", 4);
+  printSym("g_servoPulseUs", &g_servoPulseUs,  "f", 4);
+  printSym("g_ledState",     &g_ledState,      "u", 1);
+  printSym("g_servoAttached",&g_servoAttached, "u", 1);
+  Serial.println("SYMBOLS_END");
+}
+
+void printSym(const char* name, const volatile void* ptr, const char* type, uint8_t size) {
+  char buf[12];
+  snprintf(buf, sizeof(buf), "%08X", (uint32_t)ptr);
+  Serial.print("SYM:"); Serial.print(name);  Serial.print(":");
+  Serial.print(buf);    Serial.print(":");
+  Serial.print(type);   Serial.print(":");
+  Serial.println(size);
+}
+
+// ─────────────────────────────────────────────────────
+//  NOTES
+// ─────────────────────────────────────────────────────
+/*
+  WIRING — Servo motor (optional — simulation runs without it):
+    servo red   (VCC)    → external 5–6V battery +
+    servo brown (GND)    → external battery –        ← BOTH grounds
+    servo brown (GND)    → XIAO board GND            ← must be tied
+    servo orange (SIG)   → XIAO D2
+
+  SIMULATION (no servo needed):
+    g_servoAngle and g_servoPulseUs always update via a triangle
+    wave (0→180→0) at ~0.9°/20ms = ~4-second full sweep.
+    The oscilloscope and PWM bar in the webpage always show live
+    changing values regardless of whether a servo is connected.
+    When you send SERVO_POS or SERVO_SWEEP, real values take over.
+    When SERVO_STOP or SERVO_DETACH, simulation resumes immediately.
+
+  BUGS FIXED in v1.3 vs v1.2:
+    1. SERVO_SWEEP parser: indexOf(':', 12) found the trailing colon
+       of "SERVO_SWEEP:" itself, giving an empty <from> field.
+       Fixed to indexOf(':', 13).
+    2. angleToUs integer division: (angle / 180) was always 0 for
+       angles < 180 in C++ integer arithmetic.
+       Fixed to (angle / 180.0f).
+    3. g_servoAngle started at -1 with no simulation, so scope
+       showed a flat line at -1 with no servo connected.
+       Fixed: simulation runs continuously; real commands override it.
+
+  WIRING — IMU (LSM6DS3 on XIAOml expansion board):
+    Already on I2C — nothing extra needed.
+*/
