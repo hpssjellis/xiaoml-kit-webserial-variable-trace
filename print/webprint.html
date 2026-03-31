@@ -19,7 +19,7 @@
         <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
             <input type="text" id="mySerialInput" style="flex-grow: 1; padding: 8px;" placeholder="Type command here..." onkeypress="myHandleKeyPress(event)">
             <button onclick="mySendData()">Send</button>
-            <label><input type="checkbox" id="myAutoSend" checked> Auto-send (Enter)</label>
+            <label><input type="checkbox" id="myAutoSend" checked> send on enter key</label>
         </div>
 
         <textarea id="mySerialOutput" style="width: 100%; height: 400px; font-family: monospace; padding: 10px; box-sizing: border-box; border: 1px solid #ccc;" readonly></textarea>
