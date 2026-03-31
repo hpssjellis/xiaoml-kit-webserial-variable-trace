@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>My Web Serial Monitor</title>
+</head>
+<body style="font-family: sans-serif; padding: 20px; line-height: 1.6; background-color: #f4f4f4;">
+
+    <div style="max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1);">
+        <h2>My Web Serial Monitor</h2>
+
+        <div style="margin-bottom: 15px; border-bottom: 1px solid #ddd; padding-bottom: 10px;">
+            <button onclick="myConnectSerial()">Connect Microcontroller</button>
+            <button onclick="myClearTextArea()">Clear Terminal</button>
+            <button onclick="myPrintData()">Print</button>
+            <button onclick="mySaveData()">Save Log</button>
+        </div>
+
+        <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+            <input type="text" id="mySerialInput" style="flex-grow: 1; padding: 8px;" placeholder="Type command here..." onkeypress="myHandleKeyPress(event)">
+            <button onclick="mySendData()">Send</button>
+            <label><input type="checkbox" id="myAutoSend" checked> Auto-send (Enter)</label>
+        </div>
+
+        <textarea id="mySerialOutput" style="width: 100%; height: 400px; font-family: monospace; padding: 10px; box-sizing: border-box; border: 1px solid #ccc;" readonly></textarea>
+    </div>
+
+    <script>
+        let myPort;
+        let myReader;
+        let myWriter;
+        let myLineBuffer = "";
+
+        async function myConnectSerial() {
+            const myOutputElement = document.getElementById('mySerialOutput');
+            
+            try {
+                myPort = await navigator.serial.requestPort();
+                // Updated to 115200 baud as requested
+                await myPort.open({ baudRate: 115200 });
+
+                myOutputElement.value += `--- Connected @ 115200 baud: ${new Date().toLocaleString()} ---\n`;
+
+                // Setup Writer for sending data
+                const myTextEncoder = new TextEncoderStream();
+                const myWritableStreamClosed = myTextEncoder.readable.pipeTo(myPort.writable);
+                myWriter = myTextEncoder.writable.getWriter();
+
+                // Setup Reader for receiving data
+                const myTextDecoder = new TextDecoderStream();
+                const myReadableStreamClosed = myPort.readable.pipeTo(myTextDecoder.writable);
+                myReader = myTextDecoder.readable.getReader();
+
+                while (true) {
+                    const { value, done } = await myReader.read();
+                    if (done) break;
+                    if (value) {
+                        myProcessData(value);
+                    }
+                }
+            } catch (myError) {
+                myOutputElement.value += `\n[Error]: ${myError}\n`;
+            }
+        }
+
+        function myProcessData(myIncomingChunk) {
+            myLineBuffer += myIncomingChunk;
+            if (myLineBuffer.includes('\n')) {
+                const myLines = myLineBuffer.split('\n');
+                myLineBuffer = myLines.pop();
+                myLines.forEach(myLine => {
+                    myAppendWithTimeStamp(myLine.trim());
+                });
+            }
+        }
+
+        function myAppendWithTimeStamp(myCleanLine) {
+            const myOutputElement = document.getElementById('mySerialOutput');
+            const myNow = new Date();
+            const myTimeStr = myNow.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const myMillis = String(myNow.getMilliseconds()).padStart(3, '0');
+            
+            myOutputElement.value += `[${myTimeStr}.${myMillis}] ${myCleanLine}\n`;
+            myOutputElement.scrollTop = myOutputElement.scrollHeight;
+        }
+
+        async function mySendData() {
+            const myInputElement = document.getElementById('mySerialInput');
+            const myDataToSend = myInputElement.value;
+
+            if (myWriter && myDataToSend) {
+                // Sending data with a newline character
+                await myWriter.write(myDataToSend + "\n");
+                myInputElement.value = ""; 
+            } else if (!myWriter) {
+                alert("Please connect to a device first!");
+            }
+        }
+
+        function myHandleKeyPress(myEvent) {
+            const myIsAutoSend = document.getElementById('myAutoSend').checked;
+            if (myIsAutoSend && myEvent.key === "Enter") {
+                mySendData();
+            }
+        }
+
+        function myClearTextArea() {
+            document.getElementById('mySerialOutput').value = '';
+            myLineBuffer = ""; 
+        }
+
+        function myPrintData() {
+            const myDataToPrint = document.getElementById('mySerialOutput').value;
+            const myWindow = window.open('', '_blank');
+            myWindow.document.write('<pre>' + myDataToPrint + '</pre>');
+            myWindow.document.close();
+            myWindow.print();
+        }
+
+        function mySaveData() {
+            const myData = document.getElementById('mySerialOutput').value;
+            const myBlob = new Blob([myData], { type: 'text/plain' });
+            const myUrl = URL.createObjectURL(myBlob);
+            const myLink = document.createElement('a');
+            myLink.href = myUrl;
+            myLink.download = `my_serial_log_${Date.now()}.txt`;
+            myLink.click();
+            URL.revokeObjectURL(myUrl);
+        }
+    </script>
+</body>
+</html>
